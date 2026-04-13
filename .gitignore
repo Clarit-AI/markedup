@@ -3,3 +3,6 @@
 .dolt/
 *.db
 .beads-credential-key
+
+# Knowledge cache (graph + vector tiers)
+.knowledge/

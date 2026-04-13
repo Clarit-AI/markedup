@@ -87,6 +87,27 @@ func (idx *KnowledgeIndex) ReverseRefs(id string) []string {
 	return idx.reverseAdj[id]
 }
 
+// IndexData is the exported, gob-serializable representation of a
+// KnowledgeIndex. It is used by the cache package to persist and restore
+// the index without re-parsing all markdown files.
+type IndexData struct {
+	Pages []*schema.Page
+}
+
+// Export converts a KnowledgeIndex into an IndexData suitable for gob
+// encoding. The full page list is extracted in sorted-ID order.
+func (idx *KnowledgeIndex) Export() *IndexData {
+	return &IndexData{
+		Pages: idx.All(),
+	}
+}
+
+// Import reconstructs a KnowledgeIndex from an IndexData. This is the
+// inverse of Export and is used by the cache package after gob decoding.
+func Import(data *IndexData) *KnowledgeIndex {
+	return buildIndex(data.Pages)
+}
+
 // buildIndex constructs a KnowledgeIndex from a slice of parsed pages.
 // This is called single-threaded after all concurrent parsing is complete.
 func buildIndex(pages []*schema.Page) *KnowledgeIndex {
