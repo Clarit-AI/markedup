@@ -62,8 +62,8 @@ func NewVectorCache(dir string) *VectorCache {
 }
 
 const (
-	vectorsDir = "vectors"
-	metaFile   = "meta.json"
+	vectorsDir  = "vectors"
+	metaFile    = "meta.json"
 	metaVersion = 1
 )
 

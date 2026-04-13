@@ -36,6 +36,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newShowCmd())
 	root.AddCommand(newServeCmd())
 	root.AddCommand(newTUICmd())
+	root.AddCommand(newEmbedCmd())
 
 	return root
 }

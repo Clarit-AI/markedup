@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/KHAEntertainment/markedup/embed"
 	"github.com/KHAEntertainment/markedup/index"
 	"github.com/spf13/cobra"
 )
@@ -96,12 +97,14 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load %s: %w", path, err)
 	}
 
-	srv := &mcpServer{idx: result.Index}
+	srv := &mcpServer{idx: result.Index, path: path}
 	return srv.run()
 }
 
 type mcpServer struct {
-	idx *index.KnowledgeIndex
+	idx      *index.KnowledgeIndex
+	path     string             // project root directory
+	embedder embed.Embedder     // optional; nil if not configured
 }
 
 func (s *mcpServer) run() error {
@@ -220,6 +223,28 @@ func (s *mcpServer) handleRequest(req jsonRPCRequest) jsonRPCResponse {
 							"required": []string{"from"},
 						},
 					},
+					{
+						Name:        "embed_status",
+						Description: "Get embedding coverage statistics for the knowledge base",
+						InputSchema: map[string]interface{}{
+							"type":       "object",
+							"properties": map[string]interface{}{},
+						},
+					},
+					{
+						Name:        "embed_file",
+						Description: "Embed a single file on demand and cache the result",
+						InputSchema: map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"path": map[string]interface{}{
+									"type":        "string",
+									"description": "File path or page ID to embed",
+								},
+							},
+							"required": []string{"path"},
+						},
+					},
 				},
 			},
 		}
@@ -260,6 +285,10 @@ func (s *mcpServer) handleToolCall(req jsonRPCRequest) jsonRPCResponse {
 		return s.toolGetPage(req.ID, params.Arguments)
 	case "markedup_traverse":
 		return s.toolTraverse(req.ID, params.Arguments)
+	case "embed_status":
+		return s.toolEmbedStatus(req.ID)
+	case "embed_file":
+		return s.toolEmbedFile(req.ID, params.Arguments)
 	default:
 		return jsonRPCResponse{
 			JSONRPC: "2.0",
@@ -366,6 +395,86 @@ func (s *mcpServer) toolTraverse(id json.RawMessage, args json.RawMessage) jsonR
 		ID:      id,
 		Result: mcpToolCallResult{
 			Content: []mcpContentItem{{Type: "text", Text: text}},
+		},
+	}
+}
+
+func (s *mcpServer) toolEmbedStatus(id json.RawMessage) jsonRPCResponse {
+	status, err := GetEmbedStatus(s.path)
+	if err != nil {
+		return jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      id,
+			Result: mcpToolCallResult{
+				Content: []mcpContentItem{{Type: "text", Text: fmt.Sprintf("Failed to get embed status: %s", err.Error())}},
+				IsError: true,
+			},
+		}
+	}
+
+	b, _ := json.MarshalIndent(status, "", "  ")
+	return jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result: mcpToolCallResult{
+			Content: []mcpContentItem{{Type: "text", Text: string(b)}},
+		},
+	}
+}
+
+func (s *mcpServer) toolEmbedFile(id json.RawMessage, args json.RawMessage) jsonRPCResponse {
+	var params struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return errorResponse(id, -32602, "Invalid arguments", err.Error())
+	}
+
+	if params.Path == "" {
+		return jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      id,
+			Result: mcpToolCallResult{
+				Content: []mcpContentItem{{Type: "text", Text: "path is required"}},
+				IsError: true,
+			},
+		}
+	}
+
+	if s.embedder == nil {
+		return jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      id,
+			Result: mcpToolCallResult{
+				Content: []mcpContentItem{{Type: "text", Text: "No embedder configured. Start the server with embedding configuration."}},
+				IsError: true,
+			},
+		}
+	}
+
+	dims, err := EmbedSingleFile(s.path, params.Path, s.embedder)
+	if err != nil {
+		return jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      id,
+			Result: mcpToolCallResult{
+				Content: []mcpContentItem{{Type: "text", Text: err.Error()}},
+				IsError: true,
+			},
+		}
+	}
+
+	result := map[string]interface{}{
+		"path":       params.Path,
+		"dimensions": dims,
+		"status":     "embedded",
+	}
+	b, _ := json.MarshalIndent(result, "", "  ")
+	return jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result: mcpToolCallResult{
+			Content: []mcpContentItem{{Type: "text", Text: string(b)}},
 		},
 	}
 }
