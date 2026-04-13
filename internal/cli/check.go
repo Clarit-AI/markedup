@@ -38,22 +38,17 @@ func runCheck(cmd *cobra.Command, args []string) error {
 	}
 
 	var errorFiles []fileErrors
+	var parseErrors []index.LoadWarning
 	for _, w := range result.Warnings {
 		if len(w.Errors) > 0 {
 			errorFiles = append(errorFiles, fileErrors{path: w.Path, errs: w.Errors})
+		} else if w.Message != "" {
+			// Parse errors have a message but no structured validation errors.
+			parseErrors = append(parseErrors, w)
 		}
 	}
 
-	// Also validate pages that loaded successfully (they may have been counted
-	// but warnings only appear for parse errors when WithIgnoreErrors is used).
-	for _, page := range result.Index.All() {
-		errs := schema.ValidatePage(page)
-		if len(errs) > 0 {
-			errorFiles = append(errorFiles, fileErrors{path: page.SourcePath, errs: errs})
-		}
-	}
-
-	totalErrors := 0
+	totalErrors := len(parseErrors)
 	for _, fe := range errorFiles {
 		totalErrors += len(fe.errs)
 	}
@@ -68,6 +63,8 @@ func runCheck(cmd *cobra.Command, args []string) error {
 		}
 		return nil
 	}
+
+	totalFiles := len(errorFiles) + len(parseErrors)
 
 	// Print errors.
 	if jsonOutput {
@@ -87,7 +84,15 @@ func runCheck(cmd *cobra.Command, args []string) error {
 		jc := jsonCheck{
 			Pages:  totalPages,
 			Errors: totalErrors,
-			Files:  len(errorFiles),
+			Files:  totalFiles,
+		}
+		for _, pe := range parseErrors {
+			jc.Issues = append(jc.Issues, jsonErr{
+				File:    pe.Path,
+				Field:   "frontmatter",
+				Message: pe.Message,
+				Fix:     "check YAML syntax between --- delimiters",
+			})
 		}
 		for _, fe := range errorFiles {
 			for _, e := range fe.errs {
@@ -103,10 +108,13 @@ func runCheck(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(out, string(b))
 	} else {
 		fmt.Fprintf(out, "Errors found:\n\n")
+		for _, pe := range parseErrors {
+			fmt.Fprintf(out, "  %s\n    - frontmatter: %s\n      Fix: check YAML syntax between --- delimiters\n", pe.Path, pe.Message)
+		}
 		for _, fe := range errorFiles {
 			fmt.Fprint(out, formatValidationErrors(fe.path, fe.errs))
 		}
-		fmt.Fprintf(out, "\n%d pages checked. %d errors in %d files.\n", totalPages, totalErrors, len(errorFiles))
+		fmt.Fprintf(out, "\n%d pages checked. %d errors in %d files.\n", totalPages, totalErrors, totalFiles)
 		fmt.Fprintln(out, "Fix errors above, then run `markedup check` again.")
 	}
 
