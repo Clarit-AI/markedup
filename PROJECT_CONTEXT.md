@@ -82,5 +82,7 @@
 - **Last updated**: 2026-04-13
 - **Current iteration goal**: Phase 2 complete
 - **Known tech debt**: `show` command 1-arg ambiguity (path vs id heuristic); go.mod at go 1.25 (plan said 1.22+); VectorCacheLookup interface in index/search.go to avoid import cycle
+- **CRITICAL GAP**: Files without frontmatter are silently skipped by index.Load() — the entire pipeline requires manual frontmatter authoring, making markedup unusable for existing markdown corpora
 - **Open PRs**: none
-- **Next phase**: TBD — config file (.markedup.yaml), OpenRouter OAuth, ANN indexing, embed-on-search
+- **Next phase**: Phase 3 — `markedup enrich` command (auto-generate frontmatter). Tier 1: deterministic extraction (filename->id, headings->title, wikilinks->relationships). Tier 2: model-assisted via SciPhi/Triplex (entity extraction, relationship typing, semantic hints). Full spec in memory: project_phase3_enrich.md
+- **Also queued**: pageindex MCP investigation, config file (.markedup.yaml), OpenRouter OAuth
