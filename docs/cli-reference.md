@@ -10,6 +10,7 @@ These flags are available on every command.
 |------|------|---------|-------------|
 | `--json` | bool | `false` | Output in JSON format |
 | `--depth` | int | `2` | Traversal depth for the `explore` command |
+| `--no-enrich` | bool | `false` | Disable auto-enrichment of files without frontmatter |
 
 ## Output Modes
 
@@ -443,6 +444,156 @@ Dimensions:   768
   "pending": 3,
   "model": "nomic-embed-text",
   "dimensions": 768
+}
+```
+
+---
+
+## enrich
+
+Auto-generate YAML frontmatter for markdown files. Scans files and extracts `id` from filename, `title` from headings, `tags` from `#hashtags`, `relationships` from `[[wikilinks]]`, and provenance URLs from the body. Optionally uses a chat-completion model (e.g. Triplex) for richer knowledge graph extraction.
+
+Files with complete frontmatter are skipped unless `--force` is used. Partial frontmatter is filled in without overwriting existing fields.
+
+### Auto-Enrichment
+
+By default, markedup automatically enriches files without frontmatter when loading the knowledge base (via `search`, `check`, `explore`, etc.). This means files without frontmatter are indexed transparently. Use `--no-enrich` to disable this behavior.
+
+### Usage
+
+```
+markedup enrich [path] [flags]
+```
+
+### Arguments
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `path` | No | `.` (current directory) | File or directory to enrich |
+
+### Flags
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool | `false` | Show proposed frontmatter without modifying files |
+| `--force` | bool | `false` | Overwrite existing frontmatter fields |
+| `--skip-existing` | bool | `false` | Only process files with no frontmatter at all |
+| `--model` | string | `""` | Model name for Tier 2 extraction (e.g. `triplex`) |
+| `--endpoint` | string | `""` | Chat completion API endpoint (e.g. `http://localhost:11434`) |
+| `--api-key` | string | `""` | API key for model endpoint (optional) |
+| `--entity-types` | string | `""` | Comma-separated entity types for model extraction |
+| `--predicates` | string | `""` | Comma-separated relationship predicates for model extraction |
+
+### Tier 1 -- Deterministic Extraction
+
+Runs by default with no model required. Extracts:
+
+| Field | Source |
+|-------|--------|
+| `id` | Filename (slugified) |
+| `title` | First `# heading`, or filename if none |
+| `entity-type` | `"document"` (default) |
+| `confidence` | `0.7` (auto-generated) |
+| `tags` | `#hashtags` from body + directory path segments |
+| `relationships` | `[[wikilinks]]` as `related-to` with strength `0.5` |
+| `provenance.sources` | HTTP/HTTPS URLs from body |
+| `provenance.created-by` | `"markedup-enrich-v1"` |
+
+### Tier 2 -- Model-Assisted Extraction
+
+Enabled with `--model` and `--endpoint`. Uses a chat-completion API (OpenAI-compatible `/v1/chat/completions`) to extract richer metadata:
+
+- Named entities with roles and aliases
+- Typed relationships (`derived-from`, `implements`, `depends-on`, etc.)
+- Intelligent `entity-type` classification
+- `semantic-hints` and `possible-questions`
+
+Tier 1 runs first, then Tier 2 augments the result.
+
+**Triplex model** (SciPhi/Triplex, Phi3-3.8B finetune for KG extraction):
+```sh
+ollama run triplex
+markedup enrich . --model triplex --endpoint http://localhost:11434
+```
+
+> **License note:** Triplex is licensed under cc-by-nc-sa-4.0 (non-commercial use only).
+
+### Merge Behavior
+
+- **Default:** Fill missing scalar fields. Union/append arrays (tags, relationships, sources) with deduplication. Never overwrite existing values.
+- **`--force`:** Overwrite all fields with extracted values (but never blank out a field if the extracted value is empty).
+- **Idempotent:** Running `enrich` twice produces identical results.
+
+### Examples
+
+```sh
+# Enrich all files in the current directory (Tier 1)
+markedup enrich .
+
+# Preview what would change without modifying files
+markedup enrich . --dry-run
+
+# Enrich a single file
+markedup enrich ./notes/paper.md
+
+# Only process files that have no frontmatter at all
+markedup enrich . --skip-existing
+
+# Overwrite existing frontmatter fields
+markedup enrich . --force
+
+# Tier 2: model-assisted extraction with Triplex via Ollama
+markedup enrich . --model triplex --endpoint http://localhost:11434
+
+# Tier 2: custom entity types and predicates
+markedup enrich . --model triplex --endpoint http://localhost:11434 \
+  --entity-types "PERSON,CONCEPT,TOOL,EVENT" \
+  --predicates "derived-from,implements,related-to,depends-on"
+
+# JSON output for programmatic use
+markedup enrich . --json
+```
+
+### Output
+
+**Plain text:**
+
+```
+Enriched 485 files. 15 skipped. 0 errors.
+```
+
+**Plain text (`--dry-run`):**
+
+```
+--- notes/paper.md ---
+id: paper
+title: My Research Paper
+entity-type: document
+confidence: 0.7
+tags:
+    - machine-learning
+    - notes
+relationships:
+    - target: neural-networks
+      type: related-to
+      strength: 0.5
+provenance:
+    sources:
+        - https://arxiv.org/abs/1234.5678
+    created-by: markedup-enrich-v1
+```
+
+**JSON** (`--json`):
+
+```json
+{
+  "enriched": 485,
+  "skipped": 15,
+  "errors": 0,
+  "files": [
+    {"path": "notes/paper.md", "status": "enriched"},
+    {"path": "notes/complete.md", "status": "skipped", "reason": "already complete"}
+  ]
 }
 ```
 

@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/KHAEntertainment/markedup/enrich"
 	"github.com/KHAEntertainment/markedup/markdown"
 	"github.com/KHAEntertainment/markedup/schema"
 	"golang.org/x/sync/errgroup"
@@ -49,6 +51,7 @@ type loadConfig struct {
 	concurrency  int
 	filePattern  string
 	ignoreErrors bool
+	autoEnrich   bool
 	cache        CacheProvider
 	cacheDir     string
 	graphCache   GraphCacheProvider
@@ -84,6 +87,16 @@ func WithIgnoreErrors(ignore bool) LoadOption {
 	}
 }
 
+// WithAutoEnrich enables or disables automatic frontmatter enrichment for
+// files that lack frontmatter. When enabled (the default), files without
+// frontmatter are automatically enriched with deterministic extraction and
+// the enriched frontmatter is written back to disk.
+func WithAutoEnrich(enable bool) LoadOption {
+	return func(c *loadConfig) {
+		c.autoEnrich = enable
+	}
+}
+
 // WithCache sets a CacheProvider for the loader. This is a Phase 2 hook;
 // passing nil (the default) disables caching.
 func WithCache(cp CacheProvider) LoadOption {
@@ -115,6 +128,7 @@ func Load(ctx context.Context, root string, opts ...LoadOption) (*LoadResult, er
 	cfg := loadConfig{
 		concurrency: 8,
 		filePattern: "*.md",
+		autoEnrich:  true,
 	}
 	for _, o := range opts {
 		o(&cfg)
@@ -187,6 +201,24 @@ func Load(ctx context.Context, root string, opts ...LoadOption) (*LoadResult, er
 			}
 
 			page, parseErr := markdown.ParseFile(p)
+			if parseErr != nil && cfg.autoEnrich {
+				// Try permissive parse and auto-enrich.
+				enrichedPage, enrichErr := autoEnrichFile(p, root)
+				if enrichErr == nil {
+					page = enrichedPage
+					parseErr = nil
+					mu.Lock()
+					results[i] = parseResult{
+						page: page,
+						warn: &LoadWarning{
+							Path:    p,
+							Message: "auto-enriched: frontmatter added",
+						},
+					}
+					mu.Unlock()
+					return nil
+				}
+			}
 			if parseErr != nil {
 				if cfg.ignoreErrors {
 					mu.Lock()
@@ -274,4 +306,35 @@ func Load(ctx context.Context, root string, opts ...LoadOption) (*LoadResult, er
 		Index:    idx,
 		Warnings: warnings,
 	}, nil
+}
+
+// autoEnrichFile reads a file without frontmatter, enriches it with Tier 1
+// deterministic extraction, writes the enriched frontmatter back to disk,
+// and returns the enriched Page.
+func autoEnrichFile(filePath, rootDir string) (*schema.Page, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	page, err := markdown.ParseBytesPermissive(data)
+	if err != nil {
+		return nil, err
+	}
+
+	extracted := enrich.ExtractFromDocument(filePath, page.Body, rootDir)
+	merged := enrich.MergeFrontmatter(page.Frontmatter, extracted, enrich.MergeOptions{})
+
+	content, err := markdown.ReplaceFrontmatter(&merged, data)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := markdown.WriteFrontmatterFile(filePath, content); err != nil {
+		return nil, err
+	}
+
+	page.Frontmatter = merged
+	page.SourcePath = filePath
+	return page, nil
 }

@@ -12,6 +12,7 @@ var (
 	jsonOutput bool
 	depthFlag  int
 	isTTY      bool
+	noEnrich   bool
 )
 
 func newRootCmd() *cobra.Command {
@@ -28,6 +29,7 @@ func newRootCmd() *cobra.Command {
 
 	root.PersistentFlags().BoolVar(&jsonOutput, "json", false, "output in JSON format")
 	root.PersistentFlags().IntVar(&depthFlag, "depth", 2, "traversal depth for explore command")
+	root.PersistentFlags().BoolVar(&noEnrich, "no-enrich", false, "disable auto-enrichment of files without frontmatter")
 
 	root.AddCommand(newInitCmd())
 	root.AddCommand(newCheckCmd())
@@ -37,6 +39,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newServeCmd())
 	root.AddCommand(newTUICmd())
 	root.AddCommand(newEmbedCmd())
+	root.AddCommand(newEnrichCmd())
 
 	return root
 }

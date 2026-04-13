@@ -74,6 +74,30 @@ markedup files are standard markdown. Any tool that reads `.md` files works norm
 
 You can adopt markedup incrementally -- add frontmatter to existing files one at a time, and they become graph nodes without breaking anything that already reads them.
 
+### Working with Existing Files
+
+markedup works with your existing markdown files out of the box. Files without frontmatter are automatically enriched when loaded -- `id`, `title`, `tags`, and relationships are extracted from the document structure and written back as YAML frontmatter.
+
+```sh
+# Preview what markedup would extract from your files
+markedup enrich ./my-notes --dry-run
+
+# Enrich all files (writes frontmatter, non-destructive)
+markedup enrich ./my-notes
+
+# Or just use any command -- auto-enrichment happens on load
+markedup search ./my-notes "knowledge graph"
+```
+
+For richer extraction, use a local model like [Triplex](https://huggingface.co/SciPhi/Triplex) (Phi3-3.8B KG extraction model) via Ollama to classify entities, infer relationship types, and generate semantic hints:
+
+```sh
+ollama run triplex
+markedup enrich . --model triplex --endpoint http://localhost:11434
+```
+
+See [docs/cli-reference.md](docs/cli-reference.md#enrich) for all options.
+
 ## Search and Scoring
 
 markedup's search pipeline combines multiple signals to rank results:
@@ -136,6 +160,17 @@ markedup explore . knowledge-graph --depth 3
 markedup tui
 ```
 
+### Quick Start with Existing Markdown
+
+```sh
+# Point markedup at your existing notes -- auto-enrichment handles the rest
+markedup search ./my-notes "topic"
+
+# Or explicitly enrich first to review what gets generated
+markedup enrich ./my-notes --dry-run
+markedup enrich ./my-notes
+```
+
 ## MCP Integration
 
 markedup exposes an [MCP](https://modelcontextprotocol.io/) server (JSON-RPC 2.0 over stdio) so AI agents and LLMs can search, traverse, and query your knowledge graph as a tool:
@@ -169,7 +204,7 @@ See [docs/go-library.md](docs/go-library.md) for the full API guide.
 | [docs/cli-reference.md](docs/cli-reference.md) | All commands, flags, and output formats |
 | [docs/schema-reference.md](docs/schema-reference.md) | Frontmatter fields, validation rules, Obsidian compatibility |
 | [docs/mcp-tools.md](docs/mcp-tools.md) | MCP tool names, parameters, and example payloads |
-| [docs/go-library.md](docs/go-library.md) | Using markedup as a Go library |
+| [docs/go-library.md](docs/go-library.md) | Using markedup as a Go library (including enrich package) |
 
 ## License
 

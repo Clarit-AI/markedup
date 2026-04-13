@@ -155,7 +155,7 @@ func TestLoadInvalidFileWithIgnoreErrors(t *testing.T) {
 		"invalid.md": invalidMD,
 	})
 
-	result, err := Load(context.Background(), dir, WithIgnoreErrors(true))
+	result, err := Load(context.Background(), dir, WithIgnoreErrors(true), WithAutoEnrich(false))
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
@@ -181,7 +181,7 @@ func TestLoadInvalidFileWithoutIgnoreErrors(t *testing.T) {
 		"invalid.md": invalidMD,
 	})
 
-	_, err := Load(context.Background(), dir)
+	_, err := Load(context.Background(), dir, WithAutoEnrich(false))
 	require.Error(t, err)
 }
 
@@ -313,4 +313,54 @@ func TestWithConcurrencyMinimum(t *testing.T) {
 	result, err := Load(context.Background(), dir, WithConcurrency(0))
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Index.Pages())
+}
+
+func TestLoadAutoEnrich(t *testing.T) {
+	dir := t.TempDir()
+	plainMD := "# Auto Enriched\n\nThis file has no frontmatter.\n"
+	writeTestFiles(t, dir, map[string]string{
+		"valid.md": validMD,
+		"plain.md": plainMD,
+	})
+
+	// Auto-enrich enabled (default).
+	result, err := Load(context.Background(), dir)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// Both files should be indexed.
+	assert.Equal(t, 2, result.Index.Pages())
+
+	// The plain file should now have an auto-generated ID.
+	page, ok := result.Index.Get("plain")
+	require.True(t, ok)
+	assert.Equal(t, "Auto Enriched", page.Frontmatter.Title)
+	assert.Equal(t, "document", page.Frontmatter.EntityType)
+
+	// The file on disk should now have frontmatter.
+	data, err := os.ReadFile(filepath.Join(dir, "plain.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "---")
+	assert.Contains(t, string(data), "id: plain")
+
+	// Should have a warning about auto-enrichment.
+	foundEnrichWarning := false
+	for _, w := range result.Warnings {
+		if filepath.Base(w.Path) == "plain.md" && w.Message == "auto-enriched: frontmatter added" {
+			foundEnrichWarning = true
+		}
+	}
+	assert.True(t, foundEnrichWarning, "expected auto-enrich warning for plain.md")
+}
+
+func TestLoadAutoEnrichDisabled(t *testing.T) {
+	dir := t.TempDir()
+	plainMD := "# Not Enriched\n\nThis file has no frontmatter.\n"
+	writeTestFiles(t, dir, map[string]string{
+		"plain.md": plainMD,
+	})
+
+	// Auto-enrich disabled — should fail or warn.
+	_, err := Load(context.Background(), dir, WithAutoEnrich(false))
+	require.Error(t, err) // No valid files, parse fails.
 }

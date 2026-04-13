@@ -28,6 +28,7 @@ The `index` package loads a directory of markdown files into an in-memory `Knowl
 | `WithConcurrency(n)` | Max concurrent file parsers (default 8). |
 | `WithIgnoreErrors(true)` | Collect parse/validation errors as warnings instead of failing. |
 | `WithFilePattern(pattern)` | Glob pattern for matching files (default `"*.md"`). |
+| `WithAutoEnrich(bool)` | Auto-enrich files without frontmatter on load (default `true`). |
 | `WithCacheDir(dir, gc)` | Enable graph-tier cache via a `GraphCacheProvider`. |
 | `WithCache(cp)` | Set a `CacheProvider` for per-file caching. |
 
@@ -552,5 +553,85 @@ func main() {
 			fmt.Printf("  depth %d: %s\n", node.Depth, node.Page.Frontmatter.Title)
 		}
 	}
+}
+```
+
+---
+
+## Enriching Files Programmatically
+
+The `enrich` package provides deterministic frontmatter extraction and merge logic. Use it to programmatically enrich files that lack frontmatter.
+
+### Key Types and Functions
+
+- **`enrich.ExtractFromDocument(filePath, body, rootDir) ExtractedFields`** -- Tier 1 deterministic extraction from document structure.
+- **`enrich.MergeFrontmatter(existing, extracted, opts) GraphFrontmatter`** -- Merge extracted fields into existing frontmatter (fill missing, union arrays).
+- **`enrich.IsComplete(fm) bool`** -- Check if frontmatter has all required fields.
+- **`enrich.NewModelExtractor(cfg) *ModelExtractor`** -- Create a Tier 2 model extractor for chat-completion APIs.
+- **`enrich.MergeModelResult(existing, model, opts) GraphFrontmatter`** -- Merge model extraction results into frontmatter.
+
+### Permissive Parsing
+
+The `markdown` package provides permissive parsing for files that may lack frontmatter:
+
+- **`markdown.ParseBytesPermissive(data) (*Page, error)`** -- Returns a Page with zero-value Frontmatter when no `---` delimiters are found.
+- **`markdown.ParseFilePermissive(path) (*Page, error)`** -- File-based variant.
+- **`markdown.HasFrontmatter(data) bool`** -- Quick check for frontmatter presence.
+
+### Frontmatter Writing
+
+- **`markdown.PrependFrontmatter(fm, body) ([]byte, error)`** -- Serialize frontmatter and prepend to body (body preserved byte-for-byte).
+- **`markdown.ReplaceFrontmatter(fm, data) ([]byte, error)`** -- Replace existing frontmatter in file data, preserving the body exactly.
+- **`markdown.WriteFrontmatterFile(path, content) error`** -- Atomic write (temp file + rename).
+
+### Example
+
+```go
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+
+	"github.com/KHAEntertainment/markedup/enrich"
+	"github.com/KHAEntertainment/markedup/markdown"
+)
+
+func main() {
+	path := "./notes/paper.md"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Parse permissively (handles files with or without frontmatter).
+	page, err := markdown.ParseBytesPermissive(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Skip if already complete.
+	if enrich.IsComplete(page.Frontmatter) {
+		fmt.Println("Already enriched, skipping.")
+		return
+	}
+
+	// Extract fields from document structure.
+	extracted := enrich.ExtractFromDocument(path, page.Body, "./notes")
+
+	// Merge into existing frontmatter (non-destructive).
+	merged := enrich.MergeFrontmatter(page.Frontmatter, extracted, enrich.MergeOptions{})
+
+	// Write back to file.
+	content, err := markdown.ReplaceFrontmatter(&merged, data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := markdown.WriteFrontmatterFile(path, content); err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("Enriched %s: id=%s title=%q\n", path, merged.ID, merged.Title)
 }
 ```
