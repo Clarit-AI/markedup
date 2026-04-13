@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +10,8 @@ import (
 	"github.com/KHAEntertainment/markedup/embed"
 	"github.com/KHAEntertainment/markedup/index"
 	"github.com/KHAEntertainment/markedup/rerank"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/cobra"
 )
 
@@ -22,70 +23,6 @@ func newServeCmd() *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		RunE:  runServe,
 	}
-}
-
-// JSON-RPC 2.0 types.
-
-type jsonRPCRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
-}
-
-type jsonRPCResponse struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Result  interface{} `json:"result,omitempty"`
-	Error   *jsonRPCError `json:"error,omitempty"`
-}
-
-type jsonRPCError struct {
-	Code    int         `json:"code"`
-	Message string      `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
-}
-
-// MCP protocol types.
-
-type mcpServerInfo struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-}
-
-type mcpCapabilities struct {
-	Tools *struct{} `json:"tools,omitempty"`
-}
-
-type mcpInitializeResult struct {
-	ProtocolVersion string          `json:"protocolVersion"`
-	Capabilities    mcpCapabilities `json:"capabilities"`
-	ServerInfo      mcpServerInfo   `json:"serverInfo"`
-}
-
-type mcpTool struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	InputSchema map[string]interface{} `json:"inputSchema"`
-}
-
-type mcpToolsListResult struct {
-	Tools []mcpTool `json:"tools"`
-}
-
-type mcpToolCallParams struct {
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments"`
-}
-
-type mcpContentItem struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
-type mcpToolCallResult struct {
-	Content []mcpContentItem `json:"content"`
-	IsError bool             `json:"isError,omitempty"`
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
@@ -100,229 +37,101 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	srv := &mcpServer{idx: result.Index, path: path}
-	return srv.run()
+
+	s := server.NewMCPServer("markedup", "0.1.0",
+		server.WithToolCapabilities(true),
+	)
+
+	s.AddTool(srv.searchToolDef(), srv.toolSearch)
+	s.AddTool(srv.getPageToolDef(), srv.toolGetPage)
+	s.AddTool(srv.traverseToolDef(), srv.toolTraverse)
+	s.AddTool(srv.embedStatusToolDef(), srv.toolEmbedStatus)
+	s.AddTool(srv.embedFileToolDef(), srv.toolEmbedFile)
+
+	return server.ServeStdio(s)
 }
 
 type mcpServer struct {
 	idx      *index.KnowledgeIndex
-	path     string             // project root directory
-	embedder embed.Embedder     // optional; nil if not configured
+	path     string         // project root directory
+	embedder embed.Embedder // optional; nil if not configured
 }
 
-func (s *mcpServer) run() error {
-	scanner := bufio.NewScanner(os.Stdin)
-	// Increase buffer size for large requests.
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
-	encoder := json.NewEncoder(os.Stdout)
+// Tool definitions.
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		var req jsonRPCRequest
-		if err := json.Unmarshal(line, &req); err != nil {
-			resp := jsonRPCResponse{
-				JSONRPC: "2.0",
-				Error: &jsonRPCError{
-					Code:    -32700,
-					Message: "Parse error",
-					Data:    err.Error(),
-				},
-			}
-			encoder.Encode(resp)
-			continue
-		}
-
-		resp := s.handleRequest(req)
-		encoder.Encode(resp)
-	}
-
-	return scanner.Err()
+func (s *mcpServer) searchToolDef() mcp.Tool {
+	return mcp.NewTool("markedup_search",
+		mcp.WithDescription("Search the knowledge base for pages matching a query"),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("Search query string"),
+		),
+		mcp.WithBoolean("semantic",
+			mcp.Description("Enable semantic search using cached embeddings"),
+		),
+		mcp.WithBoolean("rerank",
+			mcp.Description("Re-rank results using a cross-encoder model"),
+		),
+	)
 }
 
-func (s *mcpServer) handleRequest(req jsonRPCRequest) jsonRPCResponse {
-	switch req.Method {
-	case "initialize":
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result: mcpInitializeResult{
-				ProtocolVersion: "2024-11-05",
-				Capabilities: mcpCapabilities{
-					Tools: &struct{}{},
-				},
-				ServerInfo: mcpServerInfo{
-					Name:    "markedup",
-					Version: "0.1.0",
-				},
-			},
-		}
-
-	case "notifications/initialized":
-		// No response needed for notifications, but we return an empty result.
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result:  map[string]interface{}{},
-		}
-
-	case "tools/list":
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result: mcpToolsListResult{
-				Tools: []mcpTool{
-					{
-						Name:        "markedup_search",
-						Description: "Search the knowledge base for pages matching a query",
-						InputSchema: map[string]interface{}{
-							"type": "object",
-							"properties": map[string]interface{}{
-								"query": map[string]interface{}{
-									"type":        "string",
-									"description": "Search query string",
-								},
-								"semantic": map[string]interface{}{
-									"type":        "boolean",
-									"description": "Enable semantic search using cached embeddings",
-								},
-								"rerank": map[string]interface{}{
-									"type":        "boolean",
-									"description": "Re-rank results using a cross-encoder model",
-								},
-							},
-							"required": []string{"query"},
-						},
-					},
-					{
-						Name:        "markedup_get_page",
-						Description: "Get a specific page by ID with its frontmatter and body",
-						InputSchema: map[string]interface{}{
-							"type": "object",
-							"properties": map[string]interface{}{
-								"id": map[string]interface{}{
-									"type":        "string",
-									"description": "Page ID to retrieve",
-								},
-							},
-							"required": []string{"id"},
-						},
-					},
-					{
-						Name:        "markedup_traverse",
-						Description: "Traverse the knowledge graph from a starting node",
-						InputSchema: map[string]interface{}{
-							"type": "object",
-							"properties": map[string]interface{}{
-								"from": map[string]interface{}{
-									"type":        "string",
-									"description": "Starting node ID",
-								},
-								"depth": map[string]interface{}{
-									"type":        "integer",
-									"description": "Maximum traversal depth (default 2)",
-								},
-								"direction": map[string]interface{}{
-									"type":        "string",
-									"description": "Traversal direction: forward, reverse, or both (default forward)",
-									"enum":        []string{"forward", "reverse", "both"},
-								},
-							},
-							"required": []string{"from"},
-						},
-					},
-					{
-						Name:        "embed_status",
-						Description: "Get embedding coverage statistics for the knowledge base",
-						InputSchema: map[string]interface{}{
-							"type":       "object",
-							"properties": map[string]interface{}{},
-						},
-					},
-					{
-						Name:        "embed_file",
-						Description: "Embed a single file on demand and cache the result",
-						InputSchema: map[string]interface{}{
-							"type": "object",
-							"properties": map[string]interface{}{
-								"path": map[string]interface{}{
-									"type":        "string",
-									"description": "File path or page ID to embed",
-								},
-							},
-							"required": []string{"path"},
-						},
-					},
-				},
-			},
-		}
-
-	case "tools/call":
-		return s.handleToolCall(req)
-
-	default:
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Error: &jsonRPCError{
-				Code:    -32601,
-				Message: fmt.Sprintf("Method not found: %s", req.Method),
-			},
-		}
-	}
+func (s *mcpServer) getPageToolDef() mcp.Tool {
+	return mcp.NewTool("markedup_get_page",
+		mcp.WithDescription("Get a specific page by ID with its frontmatter and body"),
+		mcp.WithString("id",
+			mcp.Required(),
+			mcp.Description("Page ID to retrieve"),
+		),
+	)
 }
 
-func (s *mcpServer) handleToolCall(req jsonRPCRequest) jsonRPCResponse {
-	var params mcpToolCallParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Error: &jsonRPCError{
-				Code:    -32602,
-				Message: "Invalid params",
-				Data:    err.Error(),
-			},
-		}
-	}
-
-	switch params.Name {
-	case "markedup_search":
-		return s.toolSearch(req.ID, params.Arguments)
-	case "markedup_get_page":
-		return s.toolGetPage(req.ID, params.Arguments)
-	case "markedup_traverse":
-		return s.toolTraverse(req.ID, params.Arguments)
-	case "embed_status":
-		return s.toolEmbedStatus(req.ID)
-	case "embed_file":
-		return s.toolEmbedFile(req.ID, params.Arguments)
-	default:
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result: mcpToolCallResult{
-				Content: []mcpContentItem{{Type: "text", Text: fmt.Sprintf("Unknown tool: %s", params.Name)}},
-				IsError: true,
-			},
-		}
-	}
+func (s *mcpServer) traverseToolDef() mcp.Tool {
+	return mcp.NewTool("markedup_traverse",
+		mcp.WithDescription("Traverse the knowledge graph from a starting node"),
+		mcp.WithString("from",
+			mcp.Required(),
+			mcp.Description("Starting node ID"),
+		),
+		mcp.WithNumber("depth",
+			mcp.Description("Maximum traversal depth (default 2)"),
+		),
+		mcp.WithString("direction",
+			mcp.Description("Traversal direction: forward, reverse, or both (default forward)"),
+			mcp.Enum("forward", "reverse", "both"),
+		),
+	)
 }
 
-func (s *mcpServer) toolSearch(id json.RawMessage, args json.RawMessage) jsonRPCResponse {
+func (s *mcpServer) embedStatusToolDef() mcp.Tool {
+	return mcp.NewTool("embed_status",
+		mcp.WithDescription("Get embedding coverage statistics for the knowledge base"),
+	)
+}
+
+func (s *mcpServer) embedFileToolDef() mcp.Tool {
+	return mcp.NewTool("embed_file",
+		mcp.WithDescription("Embed a single file on demand and cache the result"),
+		mcp.WithString("path",
+			mcp.Required(),
+			mcp.Description("File path or page ID to embed"),
+		),
+	)
+}
+
+// Tool handlers.
+
+func (s *mcpServer) toolSearch(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var params struct {
 		Query    string `json:"query"`
 		Semantic bool   `json:"semantic"`
 		Rerank   bool   `json:"rerank"`
 	}
-	if err := json.Unmarshal(args, &params); err != nil {
-		return errorResponse(id, -32602, "Invalid arguments", err.Error())
+	if err := request.BindArguments(&params); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid arguments: %s", err.Error())), nil
 	}
 
 	var searchOpts []index.SearchOption
-	searchOpts = append(searchOpts, index.WithContext(context.Background()))
+	searchOpts = append(searchOpts, index.WithContext(ctx))
 
 	if params.Semantic {
 		embedEndpoint := os.Getenv("MARKEDUP_EMBED_ENDPOINT")
@@ -361,61 +170,43 @@ func (s *mcpServer) toolSearch(id json.RawMessage, args json.RawMessage) jsonRPC
 	results := index.Search(s.idx, params.Query, searchOpts...)
 	text := formatResults(results, FormatJSON)
 
-	return jsonRPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Result: mcpToolCallResult{
-			Content: []mcpContentItem{{Type: "text", Text: text}},
-		},
-	}
+	return mcp.NewToolResultText(text), nil
 }
 
-func (s *mcpServer) toolGetPage(id json.RawMessage, args json.RawMessage) jsonRPCResponse {
+func (s *mcpServer) toolGetPage(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var params struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(args, &params); err != nil {
-		return errorResponse(id, -32602, "Invalid arguments", err.Error())
+	if err := request.BindArguments(&params); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid arguments: %s", err.Error())), nil
 	}
 
 	page, ok := s.idx.Get(params.ID)
 	if !ok {
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      id,
-			Result: mcpToolCallResult{
-				Content: []mcpContentItem{{Type: "text", Text: fmt.Sprintf("Page %q not found", params.ID)}},
-				IsError: true,
-			},
-		}
+		return mcp.NewToolResultError(fmt.Sprintf("Page %q not found", params.ID)), nil
 	}
 
 	text := formatPage(page, FormatJSON)
-	return jsonRPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Result: mcpToolCallResult{
-			Content: []mcpContentItem{{Type: "text", Text: text}},
-		},
-	}
+	return mcp.NewToolResultText(text), nil
 }
 
-func (s *mcpServer) toolTraverse(id json.RawMessage, args json.RawMessage) jsonRPCResponse {
+func (s *mcpServer) toolTraverse(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var params struct {
-		From      string `json:"from"`
-		Depth     int    `json:"depth"`
-		Direction string `json:"direction"`
+		From      string  `json:"from"`
+		Depth     float64 `json:"depth"`
+		Direction string  `json:"direction"`
 	}
-	if err := json.Unmarshal(args, &params); err != nil {
-		return errorResponse(id, -32602, "Invalid arguments", err.Error())
+	if err := request.BindArguments(&params); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid arguments: %s", err.Error())), nil
 	}
 
-	if params.Depth <= 0 {
-		params.Depth = 2
+	depth := int(params.Depth)
+	if depth <= 0 {
+		depth = 2
 	}
 
 	var opts []index.TraverseOption
-	opts = append(opts, index.WithDepth(params.Depth))
+	opts = append(opts, index.WithDepth(depth))
 
 	switch params.Direction {
 	case "reverse":
@@ -428,89 +219,42 @@ func (s *mcpServer) toolTraverse(id json.RawMessage, args json.RawMessage) jsonR
 
 	result, err := index.Traverse(s.idx, params.From, opts...)
 	if err != nil {
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      id,
-			Result: mcpToolCallResult{
-				Content: []mcpContentItem{{Type: "text", Text: err.Error()}},
-				IsError: true,
-			},
-		}
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	text := formatTraversal(result, FormatJSON)
-	return jsonRPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Result: mcpToolCallResult{
-			Content: []mcpContentItem{{Type: "text", Text: text}},
-		},
-	}
+	return mcp.NewToolResultText(text), nil
 }
 
-func (s *mcpServer) toolEmbedStatus(id json.RawMessage) jsonRPCResponse {
+func (s *mcpServer) toolEmbedStatus(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	status, err := GetEmbedStatus(s.path)
 	if err != nil {
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      id,
-			Result: mcpToolCallResult{
-				Content: []mcpContentItem{{Type: "text", Text: fmt.Sprintf("Failed to get embed status: %s", err.Error())}},
-				IsError: true,
-			},
-		}
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to get embed status: %s", err.Error())), nil
 	}
 
 	b, _ := json.MarshalIndent(status, "", "  ")
-	return jsonRPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Result: mcpToolCallResult{
-			Content: []mcpContentItem{{Type: "text", Text: string(b)}},
-		},
-	}
+	return mcp.NewToolResultText(string(b)), nil
 }
 
-func (s *mcpServer) toolEmbedFile(id json.RawMessage, args json.RawMessage) jsonRPCResponse {
+func (s *mcpServer) toolEmbedFile(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var params struct {
 		Path string `json:"path"`
 	}
-	if err := json.Unmarshal(args, &params); err != nil {
-		return errorResponse(id, -32602, "Invalid arguments", err.Error())
+	if err := request.BindArguments(&params); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid arguments: %s", err.Error())), nil
 	}
 
 	if params.Path == "" {
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      id,
-			Result: mcpToolCallResult{
-				Content: []mcpContentItem{{Type: "text", Text: "path is required"}},
-				IsError: true,
-			},
-		}
+		return mcp.NewToolResultError("path is required"), nil
 	}
 
 	if s.embedder == nil {
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      id,
-			Result: mcpToolCallResult{
-				Content: []mcpContentItem{{Type: "text", Text: "No embedder configured. Start the server with embedding configuration."}},
-				IsError: true,
-			},
-		}
+		return mcp.NewToolResultError("No embedder configured. Start the server with embedding configuration."), nil
 	}
 
 	dims, err := EmbedSingleFile(s.path, params.Path, s.embedder)
 	if err != nil {
-		return jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      id,
-			Result: mcpToolCallResult{
-				Content: []mcpContentItem{{Type: "text", Text: err.Error()}},
-				IsError: true,
-			},
-		}
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	result := map[string]interface{}{
@@ -519,23 +263,5 @@ func (s *mcpServer) toolEmbedFile(id json.RawMessage, args json.RawMessage) json
 		"status":     "embedded",
 	}
 	b, _ := json.MarshalIndent(result, "", "  ")
-	return jsonRPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Result: mcpToolCallResult{
-			Content: []mcpContentItem{{Type: "text", Text: string(b)}},
-		},
-	}
-}
-
-func errorResponse(id json.RawMessage, code int, message, data string) jsonRPCResponse {
-	return jsonRPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Error: &jsonRPCError{
-			Code:    code,
-			Message: message,
-			Data:    data,
-		},
-	}
+	return mcp.NewToolResultText(string(b)), nil
 }
