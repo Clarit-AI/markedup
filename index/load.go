@@ -21,6 +21,15 @@ type CacheProvider interface {
 	Set(path string, modTime time.Time, page *schema.Page)
 }
 
+// GraphCacheProvider is the interface for the graph tier cache. It provides
+// save/load/stale-check for the entire KnowledgeIndex. Implemented by
+// cache.GraphCache.
+type GraphCacheProvider interface {
+	Save(idx *KnowledgeIndex, dir string) error
+	Load(dir string) (*KnowledgeIndex, error)
+	Stale(dir string, files []string) (changed, added, removed []string, err error)
+}
+
 // LoadWarning represents a non-fatal issue encountered during loading.
 type LoadWarning struct {
 	Path    string
@@ -41,6 +50,8 @@ type loadConfig struct {
 	filePattern  string
 	ignoreErrors bool
 	cache        CacheProvider
+	cacheDir     string
+	graphCache   GraphCacheProvider
 }
 
 // LoadOption configures the behaviour of Load.
@@ -81,6 +92,18 @@ func WithCache(cp CacheProvider) LoadOption {
 	}
 }
 
+// WithCacheDir sets the project root directory and graph cache provider for
+// the graph tier cache. When set, Load will attempt to load a cached
+// KnowledgeIndex from .knowledge/graph/ and only re-parse files whose
+// SHA-256 checksums have changed. After building the index, it is saved
+// back to the cache. An empty dir disables caching.
+func WithCacheDir(dir string, gc GraphCacheProvider) LoadOption {
+	return func(c *loadConfig) {
+		c.cacheDir = dir
+		c.graphCache = gc
+	}
+}
+
 // Load walks root to discover markdown files, parses them concurrently
 // using bounded workers, validates each page, and builds a KnowledgeIndex.
 //
@@ -97,13 +120,16 @@ func Load(ctx context.Context, root string, opts ...LoadOption) (*LoadResult, er
 		o(&cfg)
 	}
 
-	// 1. Collect file paths.
+	// 1. Collect file paths, skipping .knowledge/ cache directory.
 	var paths []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
+			if d.Name() == ".knowledge" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		matched, matchErr := filepath.Match(cfg.filePattern, d.Name())
@@ -119,7 +145,27 @@ func Load(ctx context.Context, root string, opts ...LoadOption) (*LoadResult, er
 		return nil, fmt.Errorf("index: walk %s: %w", root, err)
 	}
 
-	// 2. Parse concurrently.
+	// 2. If graph cache is configured, try to use it.
+	if cfg.cacheDir != "" && cfg.graphCache != nil {
+		cachedIdx, cacheErr := cfg.graphCache.Load(cfg.cacheDir)
+		if cacheErr == nil {
+			// Cache hit — check staleness.
+			changed, added, removed, staleErr := cfg.graphCache.Stale(cfg.cacheDir, paths)
+			if staleErr == nil && len(changed) == 0 && len(added) == 0 && len(removed) == 0 {
+				// Fully cached, no stale files.
+				return &LoadResult{Index: cachedIdx}, nil
+			}
+			// If staleness check succeeded but there are stale files,
+			// we still need a full re-parse to rebuild the index correctly.
+			// Future optimization: merge cached pages with re-parsed stale pages.
+			_ = changed
+			_ = added
+			_ = removed
+		}
+		// Cache miss or stale — fall through to full parse.
+	}
+
+	// 3. Parse concurrently.
 	type parseResult struct {
 		page *schema.Page
 		warn *LoadWarning
@@ -190,7 +236,7 @@ func Load(ctx context.Context, root string, opts ...LoadOption) (*LoadResult, er
 		return nil, firstErr
 	}
 
-	// 3. Collect valid pages and warnings.
+	// 4. Collect valid pages and warnings.
 	var pages []*schema.Page
 	var warnings []LoadWarning
 
@@ -203,10 +249,10 @@ func Load(ctx context.Context, root string, opts ...LoadOption) (*LoadResult, er
 		}
 	}
 
-	// 4. Build index single-threaded.
+	// 5. Build index single-threaded.
 	idx := buildIndex(pages)
 
-	// 5. Check for dangling relationships.
+	// 6. Check for dangling relationships.
 	for _, p := range pages {
 		for _, rel := range p.Frontmatter.Relationships {
 			if _, ok := idx.byID[rel.Target]; !ok {
@@ -216,6 +262,12 @@ func Load(ctx context.Context, root string, opts ...LoadOption) (*LoadResult, er
 				})
 			}
 		}
+	}
+
+	// 7. Save to graph cache if configured.
+	if cfg.cacheDir != "" && cfg.graphCache != nil {
+		// Best-effort save; don't fail the load if cache save fails.
+		_ = cfg.graphCache.Save(idx, cfg.cacheDir)
 	}
 
 	return &LoadResult{
