@@ -15,7 +15,7 @@
 
 ## Architecture Decisions
 - **No database**: in-memory index built from filesystem scan
-- **MCP protocol**: JSON-RPC 2.0 over stdio for agent integration
+- **MCP protocol**: mark3labs/mcp-go SDK v0.47.1, stdio transport (was hand-rolled JSON-RPC 2.0, migrated PR #44)
 - **Frontmatter parsing**: regex + yaml.v3 (no external frontmatter lib)
 - **Output modes**: plain text (default) + JSON (--json flag) + BubbleTea TUI (`markedup tui`)
 - **Obsidian compatibility**: [[wikilinks]] in body, tags array in frontmatter, ## Related auto-generated section
@@ -48,7 +48,7 @@
 - **Error handling**: return errors, wrap with fmt.Errorf + %w; CLI shows file + field + fix suggestion
 - **Tests**: table-driven with testify require/assert
 
-## Direct Dependencies (8 total)
+## Direct Dependencies (9 total)
 1. github.com/spf13/cobra
 2. gopkg.in/yaml.v3
 3. github.com/stretchr/testify
@@ -57,6 +57,7 @@
 6. github.com/charmbracelet/bubbletea
 7. github.com/charmbracelet/lipgloss
 8. github.com/charmbracelet/bubbles
+9. github.com/mark3labs/mcp-go
 
 ## Completed Features
 ### Phase 1 — Vectorless Core
@@ -78,11 +79,22 @@
 - [x] CLI embed subcommand + MCP embedding tools (PR #31, merged 2026-04-13)
 - [x] Search pipeline integration — embeddings + reranker (PR #32, merged 2026-04-13)
 
+### Phase 3 — Enrich
+- [x] `markedup enrich` command with auto-enrichment on load (commit 50c7a67, merged 2026-04-13)
+
+### Infrastructure — MCP SDK Migration
+- [x] Replace hand-rolled MCP server with mark3labs/mcp-go SDK (PR #44, merged 2026-04-13)
+
 ## Current Status
 - **Last updated**: 2026-04-13
-- **Current iteration goal**: Phase 2 complete
+- **Current iteration goal**: Phase 3 complete, MCP SDK migrated
 - **Known tech debt**: `show` command 1-arg ambiguity (path vs id heuristic); go.mod at go 1.25 (plan said 1.22+); VectorCacheLookup interface in index/search.go to avoid import cycle
 - **CRITICAL GAP**: Files without frontmatter are silently skipped by index.Load() — the entire pipeline requires manual frontmatter authoring, making markedup unusable for existing markdown corpora
+- **MCP server**: Now uses `mark3labs/mcp-go` v0.47.1 SDK (was hand-rolled JSON-RPC 2.0). 5 tools preserved, notification handling fixed, protocol version negotiation added.
 - **Open PRs**: none
-- **Next phase**: Phase 3 — `markedup enrich` command (auto-generate frontmatter). Tier 1: deterministic extraction (filename->id, headings->title, wikilinks->relationships). Tier 2: model-assisted via SciPhi/Triplex (entity extraction, relationship typing, semantic hints). Full spec in memory: project_phase3_enrich.md
-- **Also queued**: pageindex MCP investigation, config file (.markedup.yaml), OpenRouter OAuth
+- **PageIndex investigation**: COMPLETE — PageIndex (VectifyAI) is Python, can't import as Go dep, but its vectorless retrieval architecture (LLM reasoning over compact tree) informs future graph reasoning features. Full research in `docs/design-pageindex-research.md`.
+- **Queued — PageIndex-inspired features** (design specs in `docs/`):
+  - `markedup_get_structure` + `export --compact` — compact graph export for token-efficient browsing (`docs/design-compact-graph-export.md`)
+  - Auto-generated page summaries in `enrich` (`docs/design-page-summaries.md`)
+  - `markedup_reason` — LLM graph reasoning retrieval tool (`docs/design-graph-reasoning-tool.md`)
+- **Also queued**: config file (.markedup.yaml), OpenRouter OAuth, serve_test.go
