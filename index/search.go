@@ -1,14 +1,24 @@
 package index
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/KHAEntertainment/markedup/embed"
+	"github.com/KHAEntertainment/markedup/rerank"
 	"github.com/KHAEntertainment/markedup/schema"
 	"github.com/KHAEntertainment/markedup/temporal"
 )
+
+// VectorCacheLookup is the subset of cache.VectorCache needed by the search
+// pipeline. Defining it here avoids an import cycle between index and cache.
+type VectorCacheLookup interface {
+	LoadVectors(fileID string, contentHash string) ([]float32, error)
+}
 
 // MatchType classifies how a query matched a field value.
 type MatchType int
@@ -97,20 +107,20 @@ func (r Result) FormatForLLM() string {
 	return b.String()
 }
 
-// Reranker is a Phase 2 extension point. Implementations can reorder or
-// re-score results using external signals (e.g. embeddings).
-type Reranker interface {
-	Rerank(query string, results []Result) ([]Result, error)
-}
-
 // SearchOption configures the search pipeline.
 type SearchOption func(*searchConfig)
 
 type searchConfig struct {
-	limit    int
-	minScore float64
-	reranker Reranker
+	limit           int
+	minScore        float64
+	embedder        embed.Embedder
+	vectorCache     VectorCacheLookup
+	reranker        rerank.Reranker
+	embeddingWeight float64
+	ctx             context.Context
 }
+
+const defaultEmbeddingWeight = 0.3
 
 // WithLimit sets the maximum number of results returned.
 func WithLimit(n int) SearchOption {
@@ -126,10 +136,50 @@ func WithMinScore(f float64) SearchOption {
 	}
 }
 
-// WithReranker sets a reranker to post-process results (Phase 2 hook).
-func WithReranker(r Reranker) SearchOption {
+// WithEmbedder configures an embedder for semantic similarity scoring.
+// Requires a VectorCache to be set via WithVectorCache.
+func WithEmbedder(e embed.Embedder) SearchOption {
+	return func(cfg *searchConfig) {
+		cfg.embedder = e
+	}
+}
+
+// WithVectorCache sets the vector cache used to look up pre-computed
+// embeddings for pages.
+func WithVectorCache(vc VectorCacheLookup) SearchOption {
+	return func(cfg *searchConfig) {
+		cfg.vectorCache = vc
+	}
+}
+
+// WithReranker sets a reranker to post-process results. After initial
+// scoring, the top candidates are sent to the reranker for re-ordering.
+func WithReranker(r rerank.Reranker) SearchOption {
 	return func(cfg *searchConfig) {
 		cfg.reranker = r
+	}
+}
+
+// WithEmbeddingWeight controls the balance between keyword and embedding
+// scores. The final score is (1-w)*keyword + w*embedding. Default is 0.3.
+// Values are clamped to [0.0, 1.0].
+func WithEmbeddingWeight(w float64) SearchOption {
+	return func(cfg *searchConfig) {
+		if w < 0 {
+			w = 0
+		}
+		if w > 1 {
+			w = 1
+		}
+		cfg.embeddingWeight = w
+	}
+}
+
+// WithContext sets the context for operations that may need it (embedding,
+// reranking). If not set, context.Background() is used.
+func WithContext(ctx context.Context) SearchOption {
+	return func(cfg *searchConfig) {
+		cfg.ctx = ctx
 	}
 }
 
@@ -145,30 +195,78 @@ const (
 )
 
 // Search scores every page in idx against query using multi-signal field
-// weighting, match-type multipliers, and temporal decay. Results are returned
-// sorted by descending FinalScore.
+// weighting, match-type multipliers, and temporal decay. When an embedder
+// and vector cache are configured, cosine similarity is blended with keyword
+// scores. When a reranker is configured, top results are re-scored.
+// Results are returned sorted by descending score.
 func Search(idx *KnowledgeIndex, query string, opts ...SearchOption) []Result {
 	if query == "" {
 		return nil
 	}
 
-	cfg := &searchConfig{}
+	cfg := &searchConfig{
+		embeddingWeight: defaultEmbeddingWeight,
+	}
 	for _, o := range opts {
 		o(cfg)
+	}
+	if cfg.ctx == nil {
+		cfg.ctx = context.Background()
 	}
 
 	q := strings.ToLower(strings.TrimSpace(query))
 	now := time.Now()
 
+	// Compute query embedding if embedder is configured.
+	var queryVec []float32
+	useEmbeddings := cfg.embedder != nil && cfg.vectorCache != nil
+	if useEmbeddings {
+		vecs, err := cfg.embedder.Embed(cfg.ctx, []string{query})
+		if err != nil {
+			log.Printf("search: failed to embed query, falling back to keyword-only: %v", err)
+			useEmbeddings = false
+		} else if len(vecs) > 0 {
+			queryVec = vecs[0]
+		}
+	}
+
 	var results []Result
 	for _, page := range idx.All() {
-		matches, baseScore := scorePage(page, q)
-		if baseScore == 0 {
+		matches, keywordScore := scorePage(page, q)
+		if keywordScore == 0 && !useEmbeddings {
 			continue
 		}
 
 		tm := temporalMultiplier(page, now)
-		finalScore := baseScore * tm
+		keywordFinal := keywordScore * tm
+
+		finalScore := keywordFinal
+
+		// Blend embedding score if available.
+		if useEmbeddings && queryVec != nil {
+			pageVec, err := cfg.vectorCache.LoadVectors(
+				page.Frontmatter.ID,
+				contentHashForPage(page),
+			)
+			if err != nil {
+				// No cached vectors for this page — use keyword-only.
+				if keywordScore == 0 {
+					continue
+				}
+			} else {
+				sim := embed.CosineSimilarity(queryVec, pageVec)
+				// Normalize cosine similarity from [-1,1] to [0,1].
+				embScore := (sim + 1.0) / 2.0
+				w := cfg.embeddingWeight
+				finalScore = (1-w)*keywordFinal + w*embScore
+
+				// Include pages that have high embedding similarity even
+				// if keyword score was zero.
+				if keywordScore == 0 && embScore < 0.5 {
+					continue
+				}
+			}
+		}
 
 		if cfg.minScore > 0 && finalScore < cfg.minScore {
 			continue
@@ -191,9 +289,36 @@ func Search(idx *KnowledgeIndex, query string, opts ...SearchOption) []Result {
 
 	// Apply reranker if provided.
 	if cfg.reranker != nil {
-		reranked, err := cfg.reranker.Rerank(query, results)
-		if err == nil {
-			results = reranked
+		topN := 20
+		if len(results) < topN {
+			topN = len(results)
+		}
+		if topN > 0 {
+			candidates := make([]rerank.Candidate, topN)
+			for i := 0; i < topN; i++ {
+				candidates[i] = rerank.Candidate{
+					ID:            results[i].Page.Frontmatter.ID,
+					Text:          results[i].Page.Body,
+					OriginalScore: results[i].Score,
+				}
+			}
+			ranked, err := cfg.reranker.Rerank(cfg.ctx, query, candidates)
+			if err != nil {
+				log.Printf("search: reranker failed, keeping original order: %v", err)
+			} else {
+				reranked := make([]Result, 0, len(ranked)+len(results)-topN)
+				for _, rr := range ranked {
+					if page, ok := idx.Get(rr.ID); ok {
+						reranked = append(reranked, Result{
+							Page:  page,
+							Score: rr.Score,
+						})
+					}
+				}
+				// Append remaining results that were not sent to reranker.
+				reranked = append(reranked, results[topN:]...)
+				results = reranked
+			}
 		}
 	}
 
@@ -203,6 +328,17 @@ func Search(idx *KnowledgeIndex, query string, opts ...SearchOption) []Result {
 	}
 
 	return results
+}
+
+// contentHashForPage returns a content hash for a page. This is a simple
+// hash based on the page ID for now; the real implementation will come from
+// the index loader when content hashing is fully integrated.
+func contentHashForPage(page *schema.Page) string {
+	// Use source path as a stable identifier for cache lookups.
+	if page.SourcePath != "" {
+		return page.SourcePath
+	}
+	return page.Frontmatter.ID
 }
 
 // scorePage computes the base score for a page against the query. For
