@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/KHAEntertainment/markedup/cache"
 	"github.com/KHAEntertainment/markedup/embed"
 	"github.com/KHAEntertainment/markedup/index"
+	"github.com/KHAEntertainment/markedup/rerank"
 	"github.com/spf13/cobra"
 )
 
@@ -182,6 +184,14 @@ func (s *mcpServer) handleRequest(req jsonRPCRequest) jsonRPCResponse {
 									"type":        "string",
 									"description": "Search query string",
 								},
+								"semantic": map[string]interface{}{
+									"type":        "boolean",
+									"description": "Enable semantic search using cached embeddings",
+								},
+								"rerank": map[string]interface{}{
+									"type":        "boolean",
+									"description": "Re-rank results using a cross-encoder model",
+								},
 							},
 							"required": []string{"query"},
 						},
@@ -303,13 +313,52 @@ func (s *mcpServer) handleToolCall(req jsonRPCRequest) jsonRPCResponse {
 
 func (s *mcpServer) toolSearch(id json.RawMessage, args json.RawMessage) jsonRPCResponse {
 	var params struct {
-		Query string `json:"query"`
+		Query    string `json:"query"`
+		Semantic bool   `json:"semantic"`
+		Rerank   bool   `json:"rerank"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return errorResponse(id, -32602, "Invalid arguments", err.Error())
 	}
 
-	results := index.Search(s.idx, params.Query)
+	var searchOpts []index.SearchOption
+	searchOpts = append(searchOpts, index.WithContext(context.Background()))
+
+	if params.Semantic {
+		embedEndpoint := os.Getenv("MARKEDUP_EMBED_ENDPOINT")
+		embedModel := os.Getenv("MARKEDUP_EMBED_MODEL")
+		embedAPIKey := os.Getenv("MARKEDUP_EMBED_API_KEY")
+
+		if embedEndpoint != "" && embedModel != "" {
+			emb := embed.NewOpenAICompatible(embed.Config{
+				Endpoint:  embedEndpoint,
+				ModelName: embedModel,
+				APIKey:    embedAPIKey,
+			})
+			vc := cache.NewVectorCache(".")
+			searchOpts = append(searchOpts,
+				index.WithEmbedder(emb),
+				index.WithVectorCache(vc),
+			)
+		}
+	}
+
+	if params.Rerank {
+		rerankEndpoint := os.Getenv("MARKEDUP_RERANK_ENDPOINT")
+		rerankModel := os.Getenv("MARKEDUP_RERANK_MODEL")
+		rerankAPIKey := os.Getenv("MARKEDUP_RERANK_API_KEY")
+
+		if rerankEndpoint != "" && rerankModel != "" {
+			rr := rerank.NewCrossEncoder(rerank.Config{
+				Endpoint: rerankEndpoint,
+				Model:    rerankModel,
+				APIKey:   rerankAPIKey,
+			})
+			searchOpts = append(searchOpts, index.WithReranker(rr))
+		}
+	}
+
+	results := index.Search(s.idx, params.Query, searchOpts...)
 	text := formatResults(results, FormatJSON)
 
 	return jsonRPCResponse{
