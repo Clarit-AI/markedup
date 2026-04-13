@@ -45,10 +45,18 @@
 5. github.com/mattn/go-isatty
 
 ## Completed Features
-_(none yet — greenfield)_
+- [x] Schema types + go.mod initialization (PR #9, merged 2026-04-12)
+- [x] Schema validation rules + temporal confidence decay (PR #10, merged 2026-04-12)
+- [x] Markdown parse + serialize with Obsidian wikilinks (PR #11, merged 2026-04-12)
+- [x] KnowledgeIndex + concurrent filesystem loader (PR #12, merged 2026-04-12)
+- [x] Multi-signal search scoring pipeline (PR #13, merged 2026-04-12)
+- [x] Iterative BFS/DFS graph traversal (PR #14, merged 2026-04-12)
+- [x] CLI commands (init, check, search, explore, show) + MCP stdio server (PR #15, merged 2026-04-12)
+- [x] Testdata fixtures + integration tests (PR #16, merged 2026-04-12)
 
 ## Current Status
 - **Last updated**: 2026-04-12
-- **Current iteration goal**: Phase 1 — vectorless core (types, parse, validate, index, search, traverse, CLI, MCP serve)
-- **Known tech debt**: none
+- **Current iteration goal**: Phase 1 complete
+- **Known tech debt**: `show` command 1-arg ambiguity (path vs id heuristic); go.mod at go 1.25 (plan said 1.22+)
 - **Open PRs**: none
+- **Next phase**: Phase 2 — BubbleTea TUI, Reranker implementation, cache provider, embedding pipeline
