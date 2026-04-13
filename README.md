@@ -63,6 +63,17 @@ markedup parses this frontmatter, builds a graph of relationships between files,
 
 See [docs/schema-reference.md](docs/schema-reference.md) for the complete field specification.
 
+## Compatibility
+
+markedup files are standard markdown. Any tool that reads `.md` files works normally -- the YAML frontmatter is either rendered (Obsidian, Hugo, Jekyll) or ignored (GitHub, VS Code, plain text editors). This means your knowledge base is not locked into markedup:
+
+- **[Obsidian](https://obsidian.md)** -- `[[wikilinks]]` in the body and `tags` arrays in frontmatter are fully compatible. markedup auto-generates a `## Related` section for Obsidian's graph view.
+- **GitHub Wikis and READMEs** -- GitHub renders markdown natively and displays YAML frontmatter in a table. Your knowledge base doubles as browsable documentation.
+- **Static site generators** -- Hugo, Jekyll, Zola, and others already consume YAML frontmatter. markedup files can serve as content sources without modification.
+- **Plain text** -- Every file is readable in `cat`, `less`, `grep`, or any editor. No binary formats, no proprietary encoding.
+
+You can adopt markedup incrementally -- add frontmatter to existing files one at a time, and they become graph nodes without breaking anything that already reads them.
+
 ## Search and Scoring
 
 markedup's search pipeline combines multiple signals to rank results:
@@ -75,7 +86,7 @@ markedup's search pipeline combines multiple signals to rank results:
 
 For deeper recall, markedup can generate vector embeddings for your files and blend cosine similarity into the scoring pipeline. It works with any embedding model served via the OpenAI-compatible `/v1/embeddings` API:
 
-- **Local models** -- [Ollama](https://ollama.ai), [llama.cpp](https://github.com/ggerganov/llama.cpp), or any local inference server
+- **Local models** -- [Ollama](https://ollama.ai), [llama.cpp](https://github.com/ggerganov/llama.cpp), [Synapse](https://github.com/Clarit-AI/Synapse), or any local inference server
 - **Cloud providers** -- [OpenRouter](https://openrouter.ai), OpenAI, or any OpenAI-compatible endpoint
 
 ```sh
