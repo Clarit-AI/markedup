@@ -333,6 +333,130 @@ The `text` field contains a JSON object with:
 
 ---
 
+### `markedup_get_structure`
+
+Get a compact summary of the knowledge graph structure without body text. Call this first to understand the graph before retrieving specific pages with `markedup_get_page`.
+
+#### Parameters
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `filter_entity_type` | string | No | Filter to pages with this entity type (e.g. `person`, `concept`, `project`). |
+| `filter_tag` | string | No | Filter to pages containing this tag. |
+| `include_relationships` | boolean | No | Include relationship edges in each node. Default: `true`. |
+| `include_temporal` | boolean | No | Include temporal metadata (`valid-from`, `valid-until`, `last-verified`) in each node. Default: `false`. |
+
+#### Example Request
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 15,
+  "method": "tools/call",
+  "params": {
+    "name": "markedup_get_structure",
+    "arguments": {
+      "filter_entity_type": "person",
+      "include_relationships": true
+    }
+  }
+}
+```
+
+#### Example Response
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 15,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"stats\": {\n    \"pages\": 3,\n    \"relationships\": 5,\n    \"entity_types\": [\"person\"],\n    \"tags\": [\"engineer\", \"researcher\"]\n  },\n  \"pages\": [\n    {\n      \"id\": \"alice\",\n      \"title\": \"Alice Chen\",\n      \"summary\": \"AI researcher specializing in knowledge graphs.\",\n      \"entity_type\": \"person\",\n      \"tags\": [\"engineer\", \"researcher\"],\n      \"confidence\": 0.95,\n      \"relationships\": [\n        {\"target\": \"bob\", \"type\": \"colleague\", \"strength\": 0.9}\n      ]\n    }\n  ]\n}"
+      }
+    ]
+  }
+}
+```
+
+The `text` field contains a JSON object with:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `stats` | object | Aggregate counts: `pages`, `relationships`, `entity_types`, `tags`. |
+| `pages` | array | Compact node list. Each node has `id`, `title`, `summary`, `entity_type`, `tags`, `confidence`, and optionally `relationships` and temporal fields. |
+
+---
+
+### `markedup_reason`
+
+Use LLM reasoning to answer multi-hop, structural, or dependency questions about the knowledge graph. Call this when keyword search is insufficient -- e.g. "who is connected to Alice through projects?" or "what are the main topic clusters?"
+
+Requires `MARKEDUP_LLM_ENDPOINT` and `MARKEDUP_LLM_MODEL` environment variables to be set. When the LLM is not configured, the tool returns an error: `"LLM not configured. Set MARKEDUP_LLM_ENDPOINT and MARKEDUP_LLM_MODEL environment variables."`
+
+#### Parameters
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `query` | string | Yes | The question to reason about using the knowledge graph structure. |
+| `max_pages` | number | No | Maximum pages to include in the graph summary sent to the LLM. Default: `20`. |
+| `include_relationships` | boolean | No | Include relationship edges in graph summary. Default: `true`. |
+| `include_temporal` | boolean | No | Include temporal metadata (`valid-from`, `valid-until`, `last-verified`) in graph summary. Default: `false`. |
+
+#### Behavior
+
+1. Builds a `CompactGraphSummary` of the knowledge graph (excluding body text).
+2. If the total page count exceeds `max_pages`, pre-filters using keyword search on the query plus 1-hop neighbor expansion to stay within the token budget.
+3. Sends the graph summary and question to the configured LLM via the OpenAI-compatible `/v1/chat/completions` endpoint.
+4. The LLM identifies relevant pages and relationship paths, returning structured JSON.
+5. Full page content (including body) is fetched for each page the LLM selected.
+
+#### Example Request
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 16,
+  "method": "tools/call",
+  "params": {
+    "name": "markedup_reason",
+    "arguments": {
+      "query": "Who is connected to Alice through projects?",
+      "max_pages": 30,
+      "include_relationships": true
+    }
+  }
+}
+```
+
+#### Example Response
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 16,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"reasoning\": {\n    \"thinking\": \"Alice is connected to Project Alpha via the 'member' relationship. Bob is also a member of Project Alpha, making them project-connected.\",\n    \"relationship_paths\": [\n      \"alice --member--> project-alpha\",\n      \"bob --member--> project-alpha\"\n    ]\n  },\n  \"pages\": [\n    {\n      \"id\": \"alice\",\n      \"title\": \"Alice Chen\",\n      \"entity_type\": \"person\",\n      \"body\": \"Alice Chen is an AI researcher...\"\n    },\n    {\n      \"id\": \"project-alpha\",\n      \"title\": \"Project Alpha\",\n      \"entity_type\": \"project\",\n      \"body\": \"Project Alpha is a research initiative...\"\n    }\n  ]\n}"
+      }
+    ]
+  }
+}
+```
+
+The `text` field contains a JSON object with:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `reasoning.thinking` | string | The LLM's reasoning about which pages are relevant and why. |
+| `reasoning.relationship_paths` | array | Relationship chains the LLM identified (e.g. `"alice --member--> project-alpha"`). |
+| `pages` | array | Full page content for each relevant page: `id`, `title`, `entity_type`, `body`. |
+
+---
+
 ### `embed_status`
 
 Get embedding coverage statistics for the knowledge base. Reports how many files have cached embeddings and which model was used.
@@ -441,16 +565,19 @@ If no embedder is configured, the response has `isError: true` with the message 
 
 ## Environment Variables
 
-The following environment variables configure optional embedding and reranking backends for `markedup_search` (with `semantic: true` or `rerank: true`) and `embed_file`:
+The following environment variables configure optional backends for embedding, reranking, and LLM reasoning:
 
 | Variable | Description |
 |----------|-------------|
-| `MARKEDUP_EMBED_ENDPOINT` | Embedding API endpoint (e.g. `http://localhost:11434`, `https://api.openai.com`). |
+| `MARKEDUP_EMBED_ENDPOINT` | Embedding API endpoint (e.g. `http://localhost:11434`, `https://api.openai.com`). Used by `markedup_search` (with `semantic: true`) and `embed_file`. |
 | `MARKEDUP_EMBED_MODEL` | Embedding model name (e.g. `nomic-embed-text`, `text-embedding-3-small`). |
 | `MARKEDUP_EMBED_API_KEY` | API key for the embedding endpoint (optional for local backends). |
-| `MARKEDUP_RERANK_ENDPOINT` | Reranker API endpoint (e.g. Jina, Cohere). |
+| `MARKEDUP_RERANK_ENDPOINT` | Reranker API endpoint (e.g. Jina, Cohere). Used by `markedup_search` (with `rerank: true`). |
 | `MARKEDUP_RERANK_MODEL` | Reranker model name. |
 | `MARKEDUP_RERANK_API_KEY` | API key for the reranker endpoint. |
+| `MARKEDUP_LLM_ENDPOINT` | LLM chat completion API endpoint (e.g. `http://localhost:11434`, `https://openrouter.ai/api`). Required for `markedup_reason`. |
+| `MARKEDUP_LLM_MODEL` | LLM model name (e.g. `llama3`, `mistral`). Required for `markedup_reason`. |
+| `MARKEDUP_LLM_API_KEY` | API key for the LLM endpoint (optional for local backends). |
 
 ---
 
