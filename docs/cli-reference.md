@@ -677,6 +677,8 @@ provenance:
 
 Launch an interactive terminal UI for searching, exploring, and viewing the knowledge graph. The TUI is built with the BubbleTea framework and provides keyboard-driven navigation.
 
+**First-run behavior:** If no `.markedup.yaml` configuration file is found (neither global `~/.markedup.yaml` nor local in the target directory), the TUI automatically launches the setup wizard before opening the main interface. After the wizard completes (or if the user cancels), the TUI proceeds normally.
+
 ### Usage
 
 ```
@@ -702,3 +704,42 @@ markedup tui --dir ./my-knowledge-base
 ### Output
 
 Opens a full-screen interactive terminal application. The TUI provides views for searching pages, exploring graph relationships, and viewing page content inline.
+
+---
+
+## setup
+
+Interactive configuration wizard for markedup. Walks through text-based prompts to configure embedding, LLM, and reranker endpoints, then saves the result to `~/.markedup.yaml`.
+
+The wizard auto-detects local model servers (Ollama, llama.cpp, etc.) and presents them alongside cloud provider presets (OpenRouter, OpenAI). API keys are stored in the OS keyring when available; otherwise the wizard prints environment variable instructions.
+
+### Usage
+
+```
+markedup setup
+```
+
+### Flags
+
+No command-specific flags.
+
+### Examples
+
+```sh
+# Run the setup wizard
+markedup setup
+```
+
+### Behavior
+
+1. **Auto-detection** -- Scans common local ports for running model servers.
+2. **Provider selection** -- For each service (embed, LLM, reranker), choose a detected local server, a cloud preset, a custom endpoint, or skip.
+3. **Model selection** -- Pick from detected models or type a model name.
+4. **API keys** -- Prompted only for cloud/custom providers that need authentication. Input is masked when running in a terminal.
+5. **Summary & save** -- Review the configuration and confirm. Saved to `~/.markedup.yaml`.
+
+### Notes
+
+- The `tui` command launches this wizard automatically on first run (when no config file exists).
+- Non-TTY contexts (piped input, MCP serve) print a hint suggesting `markedup setup` but do not block execution.
+- Running `setup` again overwrites the existing global config file.

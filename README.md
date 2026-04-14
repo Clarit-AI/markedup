@@ -156,9 +156,11 @@ markedup search . "knowledge graph"
 # Traverse the graph from a node
 markedup explore . knowledge-graph --depth 3
 
-# Launch the interactive TUI
+# Launch the interactive TUI (runs setup wizard on first run)
 markedup tui
 ```
+
+On first run, `markedup tui` will launch an interactive setup wizard to configure embedding, LLM, and reranker endpoints. You can also run `markedup setup` directly from the CLI at any time.
 
 ### Quick Start with Existing Markdown
 
