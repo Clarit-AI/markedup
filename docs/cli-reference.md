@@ -160,6 +160,7 @@ When one argument is provided, it is treated as the query and the current direct
 |------|------|---------|-------------|
 | `--semantic` | bool | `false` | Enable semantic search using cached embeddings (requires prior `markedup embed`) |
 | `--rerank` | bool | `false` | Re-rank results using a cross-encoder model (requires endpoint config) |
+| `--rerank-format` | string | `"jina"` | Reranker API format: `"jina"` (default, also correct for TEI) or `"openai"` |
 
 ### Environment Variables (for `--semantic`)
 
@@ -321,6 +322,77 @@ Returns structured JSON for either the index statistics or the full page data.
 
 ---
 
+## export
+
+Export the knowledge graph in a compact, token-efficient format suitable for LLM consumption. Currently requires the `--compact` flag (other formats are not yet supported).
+
+### Usage
+
+```
+markedup export [path] [flags]
+```
+
+### Arguments
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `path` | No | `.` (current directory) | Directory containing the knowledge base |
+
+### Flags
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--compact` | bool | `false` | Export compact graph summary (no body text). Required. |
+| `--entity-type` | string | `""` | Filter by entity type (e.g. `person`, `concept`) |
+| `--tag` | string | `""` | Filter by tag |
+| `--temporal` | bool | `false` | Include temporal metadata (`valid-from`, `valid-until`, `last-verified`) |
+
+### Examples
+
+```sh
+# Export the full graph as a compact summary
+markedup export --compact
+
+# Export a specific directory
+markedup export --compact ./my-knowledge-base
+
+# Filter by entity type
+markedup export --compact --entity-type person
+
+# Filter by tag with temporal metadata
+markedup export --compact --tag ai-research --temporal
+```
+
+### Output
+
+The `--compact` flag produces a JSON object with aggregate statistics and a node list (no body text). The output follows the same `CompactGraphSummary` format used by the `markedup_get_structure` MCP tool:
+
+```json
+{
+  "stats": {
+    "pages": 42,
+    "relationships": 78,
+    "entity_types": ["concept", "person", "project"],
+    "tags": ["ai", "distributed-systems", "engineering"]
+  },
+  "pages": [
+    {
+      "id": "alice",
+      "title": "Alice Chen",
+      "summary": "AI researcher specializing in knowledge graphs.",
+      "entity_type": "person",
+      "tags": ["engineer", "researcher"],
+      "confidence": 0.95,
+      "relationships": [
+        {"target": "bob", "type": "colleague", "strength": 0.9}
+      ]
+    }
+  ]
+}
+```
+
+---
+
 ## serve
 
 Start an MCP (Model Context Protocol) JSON-RPC 2.0 server over stdio. This allows AI agents and tools to interact with the knowledge base programmatically.
@@ -350,6 +422,8 @@ The server registers the following tools via the `tools/list` method:
 | `markedup_search` | Search the knowledge base for pages matching a query. Accepts `query` (string, required), `semantic` (bool), `rerank` (bool). |
 | `markedup_get_page` | Get a specific page by ID with its frontmatter and body. Accepts `id` (string, required). |
 | `markedup_traverse` | Traverse the knowledge graph from a starting node. Accepts `from` (string, required), `depth` (int, default 2), `direction` (string: `forward`, `reverse`, or `both`, default `forward`). |
+| `markedup_get_structure` | Get a compact summary of the knowledge graph structure (no body text). Accepts `filter_entity_type` (string), `filter_tag` (string), `include_relationships` (bool, default true), `include_temporal` (bool, default false). |
+| `markedup_reason` | Use LLM reasoning to answer multi-hop questions about the graph. Requires `MARKEDUP_LLM_ENDPOINT` and `MARKEDUP_LLM_MODEL` env vars. Accepts `query` (string, required), `max_pages` (number, default 20), `include_relationships` (bool, default true), `include_temporal` (bool, default false). |
 | `embed_status` | Get embedding coverage statistics for the knowledge base. No arguments. |
 | `embed_file` | Embed a single file on demand and cache the result. Accepts `path` (string, required). |
 

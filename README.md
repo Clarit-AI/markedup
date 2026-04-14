@@ -179,7 +179,7 @@ markedup exposes an [MCP](https://modelcontextprotocol.io/) server (JSON-RPC 2.0
 markedup serve ./my-kb
 ```
 
-This gives agents access to `markedup_search`, `markedup_get_page`, `markedup_traverse`, `embed_status`, and `embed_file` tools. See [docs/mcp-tools.md](docs/mcp-tools.md) for the full tool catalog and integration configs for Claude Desktop, Cursor, and Claude Code.
+This gives agents access to 7 tools: `markedup_search`, `markedup_get_page`, `markedup_traverse`, `markedup_get_structure`, `markedup_reason`, `embed_status`, and `embed_file`. See [docs/mcp-tools.md](docs/mcp-tools.md) for the full tool catalog and integration configs for Claude Desktop, Cursor, and Claude Code.
 
 ## Using as a Go Library
 

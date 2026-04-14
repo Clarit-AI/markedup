@@ -394,6 +394,111 @@ func main() {
 
 ---
 
+## LLM Chat Completion
+
+The `llm` package provides a shared OpenAI-compatible chat completion HTTP client. It is used by the `markedup_reason` MCP tool and can be used directly for custom LLM integrations.
+
+### Key Types and Functions
+
+- **`llm.Config`** -- configuration struct:
+  - `Endpoint string` -- Base URL (e.g. `http://localhost:11434`)
+  - `Model string` -- Model name (e.g. `llama3`, `mistral`)
+  - `APIKey string` -- Optional API key for authentication
+  - `HTTPClient *http.Client` -- Optional; defaults to `http.DefaultClient`
+- **`llm.NewClient(cfg Config) *Client`** -- creates a new chat completion client.
+- **`llm.Message`** -- a single chat message with `Role` and `Content` string fields.
+- **`(*Client).ChatCompletion(ctx context.Context, messages []Message) (string, error)`** -- sends a chat completion request to `{Endpoint}/v1/chat/completions` and returns the first choice's content.
+
+### Example
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"github.com/KHAEntertainment/markedup/llm"
+)
+
+func main() {
+	client := llm.NewClient(llm.Config{
+		Endpoint: "http://localhost:11434",
+		Model:    "llama3",
+	})
+
+	messages := []llm.Message{
+		{Role: "system", Content: "You are a helpful assistant."},
+		{Role: "user", Content: "What is a knowledge graph?"},
+	}
+
+	response, err := client.ChatCompletion(context.Background(), messages)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(response)
+}
+```
+
+---
+
+## Compact Graph Summary
+
+The `index.CompactGraphSummary` method builds a token-efficient summary of the knowledge graph, excluding body text. It is used by the `markedup_get_structure` MCP tool and the `export --compact` CLI command.
+
+### Key Types and Functions
+
+- **`(*KnowledgeIndex).CompactGraphSummary(opts ...SummaryOption) *GraphSummary`** -- builds the compact summary.
+- **`index.GraphSummary`** -- top-level result with `Stats SummaryStats` and `Pages []SummaryNode`.
+- **`index.SummaryStats`** -- aggregate counts: `Pages`, `Relationships`, `EntityTypes`, `Tags`.
+- **`index.SummaryNode`** -- compact page representation: `ID`, `Title`, `Summary`, `EntityType`, `Tags`, `Confidence`, `Relationships` (optional), and temporal fields (optional).
+
+### Summary Options
+
+| Option | Description |
+|---|---|
+| `WithEntityTypeFilter(et)` | Restrict to pages matching the given entity type. |
+| `WithTagFilter(tag)` | Restrict to pages containing the given tag. |
+| `WithRelationships(bool)` | Include relationship edges in each node. Default `true`. |
+| `WithTemporal(bool)` | Include temporal metadata in each node. Default `false`. |
+| `WithMaxPages(n)` | Limit the number of pages in the summary. Applied after filtering. |
+| `WithPageIDs(ids)` | Restrict to pages whose ID is in the given slice. |
+
+### Example
+
+```go
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+
+	"github.com/KHAEntertainment/markedup/index"
+)
+
+func main() {
+	result, err := index.Load(context.Background(), "./knowledge-base")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Get a compact summary filtered to "person" entities with temporal metadata.
+	summary := result.Index.CompactGraphSummary(
+		index.WithEntityTypeFilter("person"),
+		index.WithTemporal(true),
+		index.WithMaxPages(50),
+	)
+
+	out, _ := json.MarshalIndent(summary, "", "  ")
+	fmt.Println(string(out))
+}
+```
+
+---
+
 ## Caching
 
 The `cache` package provides a two-tier `.knowledge/` sidecar cache: a graph tier for the full index and a vector tier for embedding vectors.
@@ -564,11 +669,31 @@ The `enrich` package provides deterministic frontmatter extraction and merge log
 
 ### Key Types and Functions
 
-- **`enrich.ExtractFromDocument(filePath, body, rootDir) ExtractedFields`** -- Tier 1 deterministic extraction from document structure.
+- **`enrich.ExtractFromDocument(filePath, body, rootDir) ExtractedFields`** -- Tier 1 deterministic extraction from document structure. Extracts `id`, `title`, `tags`, `relationships`, and `provenance` from headings, `#hashtags`, `[[wikilinks]]`, and URLs.
 - **`enrich.MergeFrontmatter(existing, extracted, opts) GraphFrontmatter`** -- Merge extracted fields into existing frontmatter (fill missing, union arrays).
 - **`enrich.IsComplete(fm) bool`** -- Check if frontmatter has all required fields.
-- **`enrich.NewModelExtractor(cfg) *ModelExtractor`** -- Create a Tier 2 model extractor for chat-completion APIs.
-- **`enrich.MergeModelResult(existing, model, opts) GraphFrontmatter`** -- Merge model extraction results into frontmatter.
+- **`enrich.NewModelExtractor(cfg ModelConfig) *ModelExtractor`** -- Create a Tier 2 model extractor for chat-completion APIs.
+- **`(*ModelExtractor).Extract(ctx, body, entityTypes, predicates) (*ModelResult, error)`** -- Send document body to the model for entity/relationship extraction. Pass `nil` for entityTypes/predicates to use defaults.
+- **`(*ModelExtractor).GenerateSummary(ctx, title, entityType, tags, bodyPreview) (string, error)`** -- Generate a one-sentence entity description using the model.
+- **`enrich.MergeModelResult(existing, model, opts) GraphFrontmatter`** -- Merge model extraction results into frontmatter (fill missing or force overwrite).
+- **`enrich.BodyPreview(body, maxTokens) string`** -- Return an approximate preview of the body for summary generation.
+
+### Model Configuration
+
+`enrich.ModelConfig` configures the Tier 2 model extractor:
+
+| Field | Type | Description |
+|---|---|---|
+| `Endpoint` | `string` | Base URL for the chat completion API (e.g. `http://localhost:11434`). |
+| `Model` | `string` | Model name (e.g. `triplex`). |
+| `APIKey` | `string` | Optional API key for authentication. |
+| `HTTPClient` | `*http.Client` | Optional; defaults to `http.DefaultClient`. |
+| `Format` | `ModelFormat` | Prompt/parse strategy: `FormatGeneric` (default) or `FormatTriplex`. |
+
+`enrich.ModelFormat` controls how the model is prompted and how its output is parsed:
+
+- **`FormatGeneric`** -- Generic chat completion: sends a system prompt requesting JSON output with entities, relationships, entity_type, semantic_hints, and possible_questions.
+- **`FormatTriplex`** -- Triplex NER fine-tune format: uses the Triplex-specific prompt preamble and parses the `entities_and_triples` output format.
 
 ### Permissive Parsing
 
