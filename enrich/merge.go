@@ -75,6 +75,19 @@ func MergeFrontmatter(existing schema.GraphFrontmatter, extracted ExtractedField
 	return result
 }
 
+// MergeSummary merges a generated summary into existing frontmatter.
+// Default mode: fill if empty. Force mode: overwrite.
+func MergeSummary(existing schema.GraphFrontmatter, summary string, opts MergeOptions) schema.GraphFrontmatter {
+	result := existing
+	if summary == "" {
+		return result
+	}
+	if opts.Force || result.Summary == "" {
+		result.Summary = summary
+	}
+	return result
+}
+
 // IsComplete reports whether the frontmatter has all required fields populated,
 // meaning enrichment would be a no-op in default (non-force) mode for scalars.
 func IsComplete(fm schema.GraphFrontmatter) bool {

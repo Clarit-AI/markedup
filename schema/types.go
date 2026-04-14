@@ -17,6 +17,7 @@ type GraphFrontmatter struct {
 	Relationships     []Relationship `yaml:"relationships"`
 	Temporal          TemporalInfo   `yaml:"temporal"`
 	Provenance        Provenance     `yaml:"provenance"`
+	Summary           string         `yaml:"summary"`
 	SemanticHints     []string       `yaml:"semantic-hints"`
 	PossibleQuestions []string       `yaml:"possible-questions"`
 }

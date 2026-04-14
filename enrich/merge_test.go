@@ -201,6 +201,39 @@ func TestMergeFrontmatter_RelationshipDedup(t *testing.T) {
 	assert.Equal(t, "target-b", result.Relationships[1].Target)
 }
 
+func TestMergeSummary_EmptyExisting(t *testing.T) {
+	existing := schema.GraphFrontmatter{ID: "test"}
+	result := MergeSummary(existing, "A test entity", MergeOptions{})
+	assert.Equal(t, "A test entity", result.Summary)
+}
+
+func TestMergeSummary_ExistingPreserved(t *testing.T) {
+	existing := schema.GraphFrontmatter{
+		ID:      "test",
+		Summary: "Original summary",
+	}
+	result := MergeSummary(existing, "New summary", MergeOptions{})
+	assert.Equal(t, "Original summary", result.Summary)
+}
+
+func TestMergeSummary_ForceOverwrite(t *testing.T) {
+	existing := schema.GraphFrontmatter{
+		ID:      "test",
+		Summary: "Original summary",
+	}
+	result := MergeSummary(existing, "New summary", MergeOptions{Force: true})
+	assert.Equal(t, "New summary", result.Summary)
+}
+
+func TestMergeSummary_EmptySummaryNoOp(t *testing.T) {
+	existing := schema.GraphFrontmatter{
+		ID:      "test",
+		Summary: "Keep this",
+	}
+	result := MergeSummary(existing, "", MergeOptions{Force: true})
+	assert.Equal(t, "Keep this", result.Summary)
+}
+
 func TestIsComplete(t *testing.T) {
 	tests := []struct {
 		name string

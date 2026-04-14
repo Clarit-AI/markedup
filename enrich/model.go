@@ -50,6 +50,7 @@ type ModelResult struct {
 	Entities          []schema.Entity       `json:"entities"`
 	Relationships     []schema.Relationship `json:"relationships"`
 	EntityType        string                `json:"entity_type"`
+	Summary           string                `json:"summary"`
 	SemanticHints     []string              `json:"semantic_hints"`
 	PossibleQuestions []string              `json:"possible_questions"`
 }
@@ -183,6 +184,88 @@ func parseModelOutput(content string) (*ModelResult, error) {
 	return &result, nil
 }
 
+// GenerateSummary calls the model to produce a one-sentence entity description.
+// title, entityType, and tags provide context; bodyPreview is the first ~500 tokens of body.
+func (m *ModelExtractor) GenerateSummary(ctx context.Context, title, entityType string, tags []string, bodyPreview string) (string, error) {
+	tagsStr := "(none)"
+	if len(tags) > 0 {
+		tagsStr = strings.Join(tags, ", ")
+	}
+
+	prompt := fmt.Sprintf(`Generate a one-sentence summary describing what this page represents.
+Focus on the entity/concept itself, not the document structure.
+
+Title: %s
+Entity type: %s
+Tags: %s
+Body (first 500 tokens): %s
+
+Reply with ONLY the summary sentence, no quotes or formatting.`, title, entityType, tagsStr, bodyPreview)
+
+	reqBody := chatRequest{
+		Model: m.cfg.Model,
+		Messages: []chatMessage{
+			{Role: "system", Content: "You are a concise knowledge graph summarizer. Generate one-sentence entity descriptions."},
+			{Role: "user", Content: prompt},
+		},
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("enrich: marshal summary request: %w", err)
+	}
+
+	endpoint := strings.TrimRight(m.cfg.Endpoint, "/") + "/v1/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(jsonBody))
+	if err != nil {
+		return "", fmt.Errorf("enrich: create summary request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if m.cfg.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+m.cfg.APIKey)
+	}
+
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("enrich: summary request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("enrich: read summary response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("enrich: summary model returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var chatResp chatResponse
+	if err := json.Unmarshal(respBody, &chatResp); err != nil {
+		return "", fmt.Errorf("enrich: unmarshal summary response: %w", err)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return "", fmt.Errorf("enrich: summary model returned no choices")
+	}
+
+	summary := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+	// Strip surrounding quotes if the model wrapped it.
+	summary = strings.Trim(summary, "\"'")
+	return summary, nil
+}
+
+// BodyPreview returns the first maxTokens approximate tokens of a body string.
+// Uses a simple word-based approximation (not exact tokenization).
+func BodyPreview(body string, maxTokens int) string {
+	words := strings.Fields(body)
+	if len(words) <= maxTokens {
+		return body
+	}
+	return strings.Join(words[:maxTokens], " ")
+}
+
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
@@ -198,6 +281,9 @@ func MergeModelResult(existing schema.GraphFrontmatter, model *ModelResult, opts
 	if opts.Force {
 		if model.EntityType != "" {
 			result.EntityType = strings.ToLower(model.EntityType)
+		}
+		if model.Summary != "" {
+			result.Summary = model.Summary
 		}
 		if len(model.Entities) > 0 {
 			result.Entities = model.Entities
@@ -217,6 +303,9 @@ func MergeModelResult(existing schema.GraphFrontmatter, model *ModelResult, opts
 	// Default: fill missing, union arrays.
 	if result.EntityType == "" && model.EntityType != "" {
 		result.EntityType = strings.ToLower(model.EntityType)
+	}
+	if result.Summary == "" && model.Summary != "" {
+		result.Summary = model.Summary
 	}
 
 	// Union entities by name.

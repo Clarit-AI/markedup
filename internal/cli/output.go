@@ -36,6 +36,7 @@ func formatResults(results []index.Result, format OutputFormat) string {
 			ID         string  `json:"id"`
 			Title      string  `json:"title"`
 			EntityType string  `json:"entity_type"`
+			Summary    string  `json:"summary,omitempty"`
 			Score      float64 `json:"score"`
 			Matches    []struct {
 				Field string `json:"field"`
@@ -48,6 +49,7 @@ func formatResults(results []index.Result, format OutputFormat) string {
 				ID:         r.Page.Frontmatter.ID,
 				Title:      r.Page.Frontmatter.Title,
 				EntityType: r.Page.Frontmatter.EntityType,
+				Summary:    r.Page.Frontmatter.Summary,
 				Score:      r.Score,
 			}
 			for _, m := range r.Matches {
@@ -75,6 +77,9 @@ func formatResults(results []index.Result, format OutputFormat) string {
 		}
 		fmt.Fprintf(&b, "  [score: %.2f]\n", r.Score)
 		fmt.Fprintf(&b, "   ID: %s\n", fm.ID)
+		if fm.Summary != "" {
+			fmt.Fprintf(&b, "   Summary: %s\n", fm.Summary)
+		}
 		if len(r.Matches) > 0 {
 			fields := make([]string, len(r.Matches))
 			for j, m := range r.Matches {
@@ -200,6 +205,7 @@ func formatPage(page *schema.Page, format OutputFormat) string {
 			ID             string   `json:"id"`
 			Title          string   `json:"title"`
 			EntityType     string   `json:"entity_type"`
+			Summary        string   `json:"summary,omitempty"`
 			Confidence     float64  `json:"confidence"`
 			Tags           []string `json:"tags"`
 			Body           string   `json:"body"`
@@ -211,6 +217,7 @@ func formatPage(page *schema.Page, format OutputFormat) string {
 			ID:            page.Frontmatter.ID,
 			Title:         page.Frontmatter.Title,
 			EntityType:    page.Frontmatter.EntityType,
+			Summary:       page.Frontmatter.Summary,
 			Confidence:    page.Frontmatter.Confidence,
 			Tags:          page.Frontmatter.Tags,
 			Body:          page.Body,
@@ -227,6 +234,9 @@ func formatPage(page *schema.Page, format OutputFormat) string {
 	fmt.Fprintf(&b, "ID:          %s\n", fm.ID)
 	fmt.Fprintf(&b, "Title:       %s\n", fm.Title)
 	fmt.Fprintf(&b, "Type:        %s\n", fm.EntityType)
+	if fm.Summary != "" {
+		fmt.Fprintf(&b, "Summary:     %s\n", fm.Summary)
+	}
 	fmt.Fprintf(&b, "Confidence:  %.2f\n", fm.Confidence)
 	if len(fm.Tags) > 0 {
 		fmt.Fprintf(&b, "Tags:        %s\n", strings.Join(fm.Tags, ", "))
