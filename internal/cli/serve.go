@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/KHAEntertainment/markedup/cache"
 	"github.com/KHAEntertainment/markedup/embed"
 	"github.com/KHAEntertainment/markedup/index"
+	"github.com/KHAEntertainment/markedup/llm"
 	"github.com/KHAEntertainment/markedup/rerank"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -38,6 +40,17 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	srv := &mcpServer{idx: result.Index, path: path}
 
+	// Initialize LLM client from environment variables if configured.
+	if ep := os.Getenv("MARKEDUP_LLM_ENDPOINT"); ep != "" {
+		if model := os.Getenv("MARKEDUP_LLM_MODEL"); model != "" {
+			srv.llmClient = llm.NewClient(llm.Config{
+				Endpoint: ep,
+				Model:    model,
+				APIKey:   os.Getenv("MARKEDUP_LLM_API_KEY"),
+			})
+		}
+	}
+
 	s := server.NewMCPServer("markedup", "0.1.0",
 		server.WithToolCapabilities(true),
 	)
@@ -48,14 +61,16 @@ func runServe(cmd *cobra.Command, args []string) error {
 	s.AddTool(srv.getStructureToolDef(), srv.toolGetStructure)
 	s.AddTool(srv.embedStatusToolDef(), srv.toolEmbedStatus)
 	s.AddTool(srv.embedFileToolDef(), srv.toolEmbedFile)
+	s.AddTool(srv.reasonToolDef(), srv.toolReason)
 
 	return server.ServeStdio(s)
 }
 
 type mcpServer struct {
-	idx      *index.KnowledgeIndex
-	path     string         // project root directory
-	embedder embed.Embedder // optional; nil if not configured
+	idx       *index.KnowledgeIndex
+	path      string         // project root directory
+	embedder  embed.Embedder // optional; nil if not configured
+	llmClient *llm.Client    // optional; nil if LLM env vars not set
 }
 
 // Tool definitions.
@@ -320,4 +335,211 @@ func (s *mcpServer) toolEmbedFile(ctx context.Context, request mcp.CallToolReque
 	}
 	b, _ := json.MarshalIndent(result, "", "  ")
 	return mcp.NewToolResultText(string(b)), nil
+}
+
+func (s *mcpServer) reasonToolDef() mcp.Tool {
+	return mcp.NewTool("markedup_reason",
+		mcp.WithDescription("Use LLM reasoning to answer multi-hop, structural, or dependency questions about the knowledge graph. Call this when keyword search is insufficient — e.g. 'who is connected to Alice through projects?' or 'what are the main topic clusters?'"),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("The question to reason about using the knowledge graph structure"),
+		),
+		mcp.WithNumber("max_pages",
+			mcp.Description("Maximum pages to include in graph summary sent to LLM (default 20)"),
+		),
+		mcp.WithBoolean("include_relationships",
+			mcp.Description("Include relationship edges in graph summary (default true)"),
+		),
+		mcp.WithBoolean("include_temporal",
+			mcp.Description("Include temporal metadata (valid-from, valid-until, last-verified) in graph summary (default false)"),
+		),
+	)
+}
+
+// reasoningLLMResponse is the expected JSON structure from the LLM.
+type reasoningLLMResponse struct {
+	Thinking          string   `json:"thinking"`
+	PageIDs           []string `json:"page_ids"`
+	RelationshipPaths []string `json:"relationship_paths"`
+}
+
+// reasoningResult is the final response returned to the MCP caller.
+type reasoningResult struct {
+	Reasoning reasoningReasoning `json:"reasoning"`
+	Pages     []reasoningPage    `json:"pages"`
+}
+
+type reasoningReasoning struct {
+	Thinking          string   `json:"thinking"`
+	RelationshipPaths []string `json:"relationship_paths"`
+}
+
+type reasoningPage struct {
+	ID         string `json:"id"`
+	Title      string `json:"title"`
+	EntityType string `json:"entity_type"`
+	Body       string `json:"body"`
+}
+
+func (s *mcpServer) toolReason(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var params struct {
+		Query                string  `json:"query"`
+		MaxPages             float64 `json:"max_pages"`
+		IncludeRelationships *bool   `json:"include_relationships"`
+		IncludeTemporal      bool    `json:"include_temporal"`
+	}
+	if err := request.BindArguments(&params); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid arguments: %s", err.Error())), nil
+	}
+
+	if params.Query == "" {
+		return mcp.NewToolResultError("query is required"), nil
+	}
+
+	if s.llmClient == nil {
+		return mcp.NewToolResultError("LLM not configured. Set MARKEDUP_LLM_ENDPOINT and MARKEDUP_LLM_MODEL environment variables."), nil
+	}
+
+	maxPages := int(params.MaxPages)
+	if maxPages <= 0 {
+		maxPages = 20
+	}
+
+	// Build summary options.
+	var summaryOpts []index.SummaryOption
+	if params.IncludeRelationships != nil && !*params.IncludeRelationships {
+		summaryOpts = append(summaryOpts, index.WithRelationships(false))
+	}
+	if params.IncludeTemporal {
+		summaryOpts = append(summaryOpts, index.WithTemporal(true))
+	}
+
+	// Token budget management: pre-filter if graph is too large.
+	allPages := s.idx.All()
+	if len(allPages) > maxPages {
+		// Pre-filter with keyword search, then expand 1-hop neighbors.
+		results := index.Search(s.idx, params.Query)
+		limit := maxPages
+		if len(results) < limit {
+			limit = len(results)
+		}
+
+		idSet := make(map[string]struct{})
+		for _, r := range results[:limit] {
+			idSet[r.Page.Frontmatter.ID] = struct{}{}
+		}
+
+		// Expand 1-hop neighbors.
+		var toExpand []string
+		for id := range idSet {
+			toExpand = append(toExpand, id)
+		}
+		for _, id := range toExpand {
+			for _, rel := range s.idx.ForwardRels(id) {
+				idSet[rel.Target] = struct{}{}
+			}
+			for _, refID := range s.idx.ReverseRefs(id) {
+				idSet[refID] = struct{}{}
+			}
+		}
+
+		ids := make([]string, 0, len(idSet))
+		for id := range idSet {
+			ids = append(ids, id)
+		}
+		summaryOpts = append(summaryOpts, index.WithPageIDs(ids))
+	}
+
+	summary := s.idx.CompactGraphSummary(summaryOpts...)
+
+	graphJSON, err := json.Marshal(summary)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal graph summary: %s", err.Error())), nil
+	}
+
+	// Build graph navigation prompt.
+	userPrompt := fmt.Sprintf(`You are given a question and the structure of a knowledge graph.
+Each node represents a markdown page with metadata. Edges represent typed relationships between pages.
+
+Your task: identify which pages are most likely to contain or contribute to answering the question.
+Consider relationship chains, entity types, temporal validity, and confidence scores.
+
+Question: %s
+
+Knowledge graph structure:
+%s
+
+Reply in JSON:
+{
+  "thinking": "Your reasoning about which pages are relevant and why, considering the graph structure",
+  "page_ids": ["id1", "id2"],
+  "relationship_paths": ["id1 --type--> id2"]
+}`, params.Query, string(graphJSON))
+
+	messages := []llm.Message{
+		{Role: "system", Content: "You are a knowledge graph reasoning assistant."},
+		{Role: "user", Content: userPrompt},
+	}
+
+	llmContent, err := s.llmClient.ChatCompletion(ctx, messages)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("LLM request failed: %s", err.Error())), nil
+	}
+
+	// Parse LLM response with lenient JSON handling.
+	var llmResp reasoningLLMResponse
+	cleaned := stripMarkdownFences(llmContent)
+	if err := json.Unmarshal([]byte(cleaned), &llmResp); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to parse LLM response: %s\nRaw output: %s", err.Error(), truncateStr(llmContent, 500))), nil
+	}
+
+	// Fetch full pages for each page_id.
+	var pages []reasoningPage
+	for _, id := range llmResp.PageIDs {
+		page, ok := s.idx.Get(id)
+		if !ok {
+			continue // skip unknown page IDs from the LLM
+		}
+		pages = append(pages, reasoningPage{
+			ID:         page.Frontmatter.ID,
+			Title:      page.Frontmatter.Title,
+			EntityType: page.Frontmatter.EntityType,
+			Body:       page.Body,
+		})
+	}
+
+	result := reasoningResult{
+		Reasoning: reasoningReasoning{
+			Thinking:          llmResp.Thinking,
+			RelationshipPaths: llmResp.RelationshipPaths,
+		},
+		Pages: pages,
+	}
+
+	b, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal result: %s", err.Error())), nil
+	}
+
+	return mcp.NewToolResultText(string(b)), nil
+}
+
+// stripMarkdownFences removes markdown code fences (```json ... ```) from LLM output.
+func stripMarkdownFences(content string) string {
+	content = strings.TrimSpace(content)
+	if strings.HasPrefix(content, "```") {
+		lines := strings.Split(content, "\n")
+		if len(lines) >= 3 {
+			content = strings.Join(lines[1:len(lines)-1], "\n")
+		}
+	}
+	return strings.TrimSpace(content)
+}
+
+// truncateStr returns the first maxLen characters of s, appending "..." if truncated.
+func truncateStr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }

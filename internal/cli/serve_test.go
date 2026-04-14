@@ -3,9 +3,14 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/KHAEntertainment/markedup/index"
+	"github.com/KHAEntertainment/markedup/llm"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -316,4 +321,234 @@ func TestMCP_IndexFromTestdata(t *testing.T) {
 	require.True(t, ok, "index should contain alice page")
 	assert.Equal(t, "Alice Chen", page.Frontmatter.Title)
 	assert.Equal(t, "person", page.Frontmatter.EntityType)
+}
+
+// ---------------------------------------------------------------------------
+// markedup_reason
+// ---------------------------------------------------------------------------
+
+// mockLLMServer creates an httptest.Server that returns canned LLM responses.
+// It captures the last request body for assertion.
+func mockLLMServer(t *testing.T, response string) (*httptest.Server, *string) {
+	t.Helper()
+	var lastBody string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Capture request body for assertions.
+		bodyBytes, _ := io.ReadAll(r.Body)
+		lastBody = string(bodyBytes)
+
+		resp := fmt.Sprintf(`{"choices":[{"message":{"role":"assistant","content":%s}}]}`, response)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(resp))
+	}))
+	return ts, &lastBody
+}
+
+func testMCPServerWithLLM(t *testing.T, endpoint, model string) *mcpServer {
+	t.Helper()
+	srv := testMCPServer(t)
+	srv.llmClient = llm.NewClient(llm.Config{
+		Endpoint: endpoint,
+		Model:    model,
+	})
+	return srv
+}
+
+func TestMCP_Reason_ToolDef(t *testing.T) {
+	srv := testMCPServer(t)
+	def := srv.reasonToolDef()
+
+	assert.Equal(t, "markedup_reason", def.Name)
+	assert.NotEmpty(t, def.Description)
+	assert.ElementsMatch(t, []string{"query"}, def.InputSchema.Required)
+
+	_, hasQuery := def.InputSchema.Properties["query"]
+	assert.True(t, hasQuery, "should have query param")
+	_, hasMaxPages := def.InputSchema.Properties["max_pages"]
+	assert.True(t, hasMaxPages, "should have max_pages param")
+	_, hasRels := def.InputSchema.Properties["include_relationships"]
+	assert.True(t, hasRels, "should have include_relationships param")
+	_, hasTemporal := def.InputSchema.Properties["include_temporal"]
+	assert.True(t, hasTemporal, "should have include_temporal param")
+}
+
+func TestMCP_Reason_NoLLMConfigured(t *testing.T) {
+	srv := testMCPServer(t)
+	ctx := context.Background()
+
+	result, err := srv.toolReason(ctx, callToolReq(map[string]any{"query": "who works with alice?"}))
+	require.NoError(t, err, "should not return Go error")
+	require.True(t, result.IsError, "should return MCP error when LLM not configured")
+
+	text := resultText(t, result)
+	assert.Contains(t, text, "LLM not configured")
+	assert.Contains(t, text, "MARKEDUP_LLM_ENDPOINT")
+}
+
+func TestMCP_Reason_EmptyQuery(t *testing.T) {
+	srv := testMCPServer(t)
+	ctx := context.Background()
+
+	result, err := srv.toolReason(ctx, callToolReq(map[string]any{"query": ""}))
+	require.NoError(t, err)
+	require.True(t, result.IsError, "empty query should return error")
+
+	text := resultText(t, result)
+	assert.Contains(t, text, "required")
+}
+
+func TestMCP_Reason_HappyPath(t *testing.T) {
+	// Canned LLM response.
+	cannedJSON := `"{\"thinking\":\"Alice is connected to Bob through project-alpha.\",\"page_ids\":[\"alice\",\"bob\"],\"relationship_paths\":[\"alice --colleague--> bob\"]}"`
+	ts, lastBody := mockLLMServer(t, cannedJSON)
+	defer ts.Close()
+
+	srv := testMCPServerWithLLM(t, ts.URL, "test-model")
+	ctx := context.Background()
+
+	result, err := srv.toolReason(ctx, callToolReq(map[string]any{"query": "who works with alice?"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError, "happy path should not return error")
+
+	text := resultText(t, result)
+
+	// Verify response structure.
+	var parsed reasoningResult
+	require.NoError(t, json.Unmarshal([]byte(text), &parsed), "result should be valid JSON")
+
+	assert.Equal(t, "Alice is connected to Bob through project-alpha.", parsed.Reasoning.Thinking)
+	assert.Contains(t, parsed.Reasoning.RelationshipPaths, "alice --colleague--> bob")
+	assert.Len(t, parsed.Pages, 2, "should have 2 pages (alice, bob)")
+
+	// Verify pages have full content.
+	pageIDs := make([]string, len(parsed.Pages))
+	for i, p := range parsed.Pages {
+		pageIDs[i] = p.ID
+		assert.NotEmpty(t, p.Title, "page should have title")
+		assert.NotEmpty(t, p.Body, "page should have body content")
+	}
+	assert.Contains(t, pageIDs, "alice")
+	assert.Contains(t, pageIDs, "bob")
+
+	// Verify prompt construction: last request body should contain the query and graph JSON.
+	assert.Contains(t, *lastBody, "who works with alice?", "prompt should contain the query")
+	assert.Contains(t, *lastBody, "knowledge graph", "prompt should reference knowledge graph")
+}
+
+func TestMCP_Reason_MarkdownFencesStripped(t *testing.T) {
+	// LLM response wrapped in markdown fences.
+	cannedJSON := "\"```json\\n{\\\"thinking\\\":\\\"test\\\",\\\"page_ids\\\":[\\\"alice\\\"],\\\"relationship_paths\\\":[]}\\n```\""
+	ts, _ := mockLLMServer(t, cannedJSON)
+	defer ts.Close()
+
+	srv := testMCPServerWithLLM(t, ts.URL, "test-model")
+	ctx := context.Background()
+
+	result, err := srv.toolReason(ctx, callToolReq(map[string]any{"query": "test query"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError, "should handle markdown fences gracefully")
+
+	text := resultText(t, result)
+	var parsed reasoningResult
+	require.NoError(t, json.Unmarshal([]byte(text), &parsed))
+	assert.Equal(t, "test", parsed.Reasoning.Thinking)
+	assert.Len(t, parsed.Pages, 1)
+}
+
+func TestMCP_Reason_InvalidLLMResponse(t *testing.T) {
+	// LLM returns garbage.
+	cannedJSON := `"this is not json at all"`
+	ts, _ := mockLLMServer(t, cannedJSON)
+	defer ts.Close()
+
+	srv := testMCPServerWithLLM(t, ts.URL, "test-model")
+	ctx := context.Background()
+
+	result, err := srv.toolReason(ctx, callToolReq(map[string]any{"query": "test query"}))
+	require.NoError(t, err, "should not return Go error")
+	require.True(t, result.IsError, "invalid LLM response should return MCP error")
+
+	text := resultText(t, result)
+	assert.Contains(t, text, "Failed to parse LLM response")
+	assert.Contains(t, text, "this is not json at all", "error should include raw output for debugging")
+}
+
+func TestMCP_Reason_UnknownPageIDs(t *testing.T) {
+	// LLM returns page IDs that don't exist in the index — should be skipped gracefully.
+	cannedJSON := `"{\"thinking\":\"found stuff\",\"page_ids\":[\"alice\",\"nonexistent_xyz\"],\"relationship_paths\":[]}"`
+	ts, _ := mockLLMServer(t, cannedJSON)
+	defer ts.Close()
+
+	srv := testMCPServerWithLLM(t, ts.URL, "test-model")
+	ctx := context.Background()
+
+	result, err := srv.toolReason(ctx, callToolReq(map[string]any{"query": "test"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	text := resultText(t, result)
+	var parsed reasoningResult
+	require.NoError(t, json.Unmarshal([]byte(text), &parsed))
+	assert.Len(t, parsed.Pages, 1, "should only return alice, skipping nonexistent")
+	assert.Equal(t, "alice", parsed.Pages[0].ID)
+}
+
+func TestMCP_Reason_PreFilterPath(t *testing.T) {
+	// Use max_pages=1 to force pre-filtering (testdata has 6 pages).
+	cannedJSON := `"{\"thinking\":\"filtered\",\"page_ids\":[\"alice\"],\"relationship_paths\":[]}"`
+	ts, lastBody := mockLLMServer(t, cannedJSON)
+	defer ts.Close()
+
+	srv := testMCPServerWithLLM(t, ts.URL, "test-model")
+	ctx := context.Background()
+
+	result, err := srv.toolReason(ctx, callToolReq(map[string]any{
+		"query":     "alice",
+		"max_pages": float64(1),
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// The prompt should contain a graph summary — verify it was sent.
+	assert.Contains(t, *lastBody, "alice", "pre-filtered prompt should include alice")
+
+	text := resultText(t, result)
+	var parsed reasoningResult
+	require.NoError(t, json.Unmarshal([]byte(text), &parsed))
+	assert.Equal(t, "filtered", parsed.Reasoning.Thinking)
+}
+
+func TestStripMarkdownFences(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "no fences",
+			input:    `{"thinking": "test"}`,
+			expected: `{"thinking": "test"}`,
+		},
+		{
+			name:     "json fences",
+			input:    "```json\n{\"thinking\": \"test\"}\n```",
+			expected: `{"thinking": "test"}`,
+		},
+		{
+			name:     "plain fences",
+			input:    "```\n{\"thinking\": \"test\"}\n```",
+			expected: `{"thinking": "test"}`,
+		},
+		{
+			name:     "whitespace around fences",
+			input:    "  \n```json\n{\"thinking\": \"test\"}\n```\n  ",
+			expected: `{"thinking": "test"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, stripMarkdownFences(tt.input))
+		})
+	}
 }
