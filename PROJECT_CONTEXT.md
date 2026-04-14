@@ -92,10 +92,11 @@
 
 ### Wave 1.5 — Local Model Test Infrastructure
 - [x] E2E tests + smoke script + docs for local model endpoints (PR #49, merged 2026-04-13, KHA-281)
+- [x] Triplex-native prompt format + entities_and_triples parser (PR #50, merged 2026-04-13, KHA-284)
 
 ## Current Status
 - **Last updated**: 2026-04-13
-- **Current iteration goal**: Wave 1.5 complete, Wave 2 (markedup_reason) next
+- **Current iteration goal**: Wave 1.5 complete (KHA-284 resolved), Wave 2 (markedup_reason) next
 - **Known tech debt**: `show` command 1-arg ambiguity (path vs id heuristic); go.mod at go 1.25 (plan said 1.22+); VectorCacheLookup interface in index/search.go to avoid import cycle; `SummaryNode` in graph_summary.go missing `Summary` field (needs connecting KHA-275 + KHA-276 output)
 - **CRITICAL GAP**: Files without frontmatter are silently skipped by index.Load() — the entire pipeline requires manual frontmatter authoring, making markedup unusable for existing markdown corpora
 - **MCP server**: Now uses `mark3labs/mcp-go` v0.47.1 SDK. 6 tools: `markedup_search`, `markedup_get_page`, `markedup_traverse`, `markedup_get_structure`, `embed_status`, `embed_file`. Integration tests in serve_test.go.
@@ -105,7 +106,8 @@
 - **Open PRs**: none
 - **PageIndex investigation**: COMPLETE — Full research in `docs/design-pageindex-research.md`.
 - **Queued — Next up** (Linear project: MarkedUp — Knowledge Graph CLI):
-  - KHA-278: `markedup_reason` — LLM graph reasoning retrieval tool (Wave 2, depends on KHA-275 + model endpoints)
+  - KHA-278: `markedup_reason` — LLM graph reasoning MCP tool (Wave 2, High priority; prereq: add `Summary` field to `SummaryNode` in graph_summary.go; design doc: `docs/design-graph-reasoning-tool.md`)
+  - KHA-283: Local reranker support — Granite Rerank via TEI (Wave 2, Medium)
   - KHA-279: Config file (.markedup.yaml) (Wave 3)
   - KHA-280: OpenRouter OAuth browser auth (Future)
   - KHA-282: Remote model E2E testing — OpenRouter + HF Inference Endpoints (Wave 1.5, owner: human)
