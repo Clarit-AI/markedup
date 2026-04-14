@@ -40,6 +40,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newTUICmd())
 	root.AddCommand(newEmbedCmd())
 	root.AddCommand(newEnrichCmd())
+	root.AddCommand(newExportCmd())
 
 	return root
 }

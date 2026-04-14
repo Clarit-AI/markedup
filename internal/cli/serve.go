@@ -45,6 +45,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	s.AddTool(srv.searchToolDef(), srv.toolSearch)
 	s.AddTool(srv.getPageToolDef(), srv.toolGetPage)
 	s.AddTool(srv.traverseToolDef(), srv.toolTraverse)
+	s.AddTool(srv.getStructureToolDef(), srv.toolGetStructure)
 	s.AddTool(srv.embedStatusToolDef(), srv.toolEmbedStatus)
 	s.AddTool(srv.embedFileToolDef(), srv.toolEmbedFile)
 
@@ -114,6 +115,24 @@ func (s *mcpServer) embedFileToolDef() mcp.Tool {
 		mcp.WithString("path",
 			mcp.Required(),
 			mcp.Description("File path or page ID to embed"),
+		),
+	)
+}
+
+func (s *mcpServer) getStructureToolDef() mcp.Tool {
+	return mcp.NewTool("markedup_get_structure",
+		mcp.WithDescription("Get a compact summary of the knowledge graph structure (no body text). Call this first to understand the graph, then use markedup_get_page for specific pages."),
+		mcp.WithString("filter_entity_type",
+			mcp.Description("Filter to pages with this entity type (e.g. person, concept, project)"),
+		),
+		mcp.WithString("filter_tag",
+			mcp.Description("Filter to pages containing this tag"),
+		),
+		mcp.WithBoolean("include_relationships",
+			mcp.Description("Include relationship edges in each node (default true)"),
+		),
+		mcp.WithBoolean("include_temporal",
+			mcp.Description("Include temporal metadata (valid-from, valid-until, last-verified) in each node (default false)"),
 		),
 	)
 }
@@ -233,6 +252,41 @@ func (s *mcpServer) toolEmbedStatus(ctx context.Context, request mcp.CallToolReq
 	}
 
 	b, _ := json.MarshalIndent(status, "", "  ")
+	return mcp.NewToolResultText(string(b)), nil
+}
+
+func (s *mcpServer) toolGetStructure(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var params struct {
+		FilterEntityType     string `json:"filter_entity_type"`
+		FilterTag            string `json:"filter_tag"`
+		IncludeRelationships *bool  `json:"include_relationships"`
+		IncludeTemporal      bool   `json:"include_temporal"`
+	}
+	if err := request.BindArguments(&params); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid arguments: %s", err.Error())), nil
+	}
+
+	var opts []index.SummaryOption
+	if params.FilterEntityType != "" {
+		opts = append(opts, index.WithEntityTypeFilter(params.FilterEntityType))
+	}
+	if params.FilterTag != "" {
+		opts = append(opts, index.WithTagFilter(params.FilterTag))
+	}
+	// include_relationships defaults to true; only disable if explicitly false.
+	if params.IncludeRelationships != nil && !*params.IncludeRelationships {
+		opts = append(opts, index.WithRelationships(false))
+	}
+	if params.IncludeTemporal {
+		opts = append(opts, index.WithTemporal(true))
+	}
+
+	summary := s.idx.CompactGraphSummary(opts...)
+	b, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal summary: %s", err.Error())), nil
+	}
+
 	return mcp.NewToolResultText(string(b)), nil
 }
 
