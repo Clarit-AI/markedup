@@ -12,6 +12,14 @@ import (
 	"github.com/KHAEntertainment/markedup/schema"
 )
 
+// ModelFormat selects the prompt/parse strategy for Extract().
+type ModelFormat int
+
+const (
+	FormatGeneric ModelFormat = iota // default: generic chat completion
+	FormatTriplex                    // Triplex NER fine-tune format
+)
+
 // DefaultEntityTypes are the entity types used when none are specified.
 var DefaultEntityTypes = []string{
 	"PERSON", "ORGANIZATION", "CONCEPT", "TOOL", "EVENT", "LOCATION", "DOCUMENT",
@@ -28,6 +36,7 @@ type ModelConfig struct {
 	Model      string       // Model name (e.g. "triplex")
 	APIKey     string       // Optional API key for authentication
 	HTTPClient *http.Client // Optional; defaults to http.DefaultClient
+	Format     ModelFormat  // zero value = FormatGeneric, no breaking change
 }
 
 // ModelExtractor calls a chat-completion API to extract structured knowledge.
@@ -65,9 +74,27 @@ func (m *ModelExtractor) Extract(ctx context.Context, body string, entityTypes, 
 		predicates = DefaultPredicates
 	}
 
+	if m.cfg.Format == FormatTriplex {
+		userMsg, err := buildTriplexMessage(entityTypes, predicates, body)
+		if err != nil {
+			return nil, err
+		}
+		req := chatRequest{
+			Model: m.cfg.Model,
+			Messages: []chatMessage{
+				{Role: "user", Content: userMsg},
+			},
+		}
+		content, err := m.sendChatRequest(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		return parseTriplexOutput(content)
+	}
+
 	systemPrompt := buildSystemPrompt(entityTypes, predicates)
 
-	reqBody := chatRequest{
+	req := chatRequest{
 		Model: m.cfg.Model,
 		Messages: []chatMessage{
 			{Role: "system", Content: systemPrompt},
@@ -75,15 +102,24 @@ func (m *ModelExtractor) Extract(ctx context.Context, body string, entityTypes, 
 		},
 	}
 
+	content, err := m.sendChatRequest(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return parseModelOutput(content)
+}
+
+// sendChatRequest sends a chat completion request and returns the first choice's content.
+func (m *ModelExtractor) sendChatRequest(ctx context.Context, reqBody chatRequest) (string, error) {
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("enrich: marshal request: %w", err)
+		return "", fmt.Errorf("enrich: marshal request: %w", err)
 	}
 
 	endpoint := strings.TrimRight(m.cfg.Endpoint, "/") + "/v1/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(jsonBody))
 	if err != nil {
-		return nil, fmt.Errorf("enrich: create request: %w", err)
+		return "", fmt.Errorf("enrich: create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -93,30 +129,29 @@ func (m *ModelExtractor) Extract(ctx context.Context, body string, entityTypes, 
 
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("enrich: model request failed: %w", err)
+		return "", fmt.Errorf("enrich: model request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("enrich: read response: %w", err)
+		return "", fmt.Errorf("enrich: read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("enrich: model returned status %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("enrich: model returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var chatResp chatResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return nil, fmt.Errorf("enrich: unmarshal response: %w", err)
+		return "", fmt.Errorf("enrich: unmarshal response: %w", err)
 	}
 
 	if len(chatResp.Choices) == 0 {
-		return nil, fmt.Errorf("enrich: model returned no choices")
+		return "", fmt.Errorf("enrich: model returned no choices")
 	}
 
-	content := chatResp.Choices[0].Message.Content
-	return parseModelOutput(content)
+	return chatResp.Choices[0].Message.Content, nil
 }
 
 // chatRequest is the OpenAI-compatible chat completion request.
@@ -184,6 +219,126 @@ func parseModelOutput(content string) (*ModelResult, error) {
 	return &result, nil
 }
 
+// buildTriplexMessage constructs the user message for the Triplex NER fine-tune.
+// The preamble text is a trigger for the fine-tuned weights and must match exactly.
+func buildTriplexMessage(entityTypes, predicates []string, body string) (string, error) {
+	entityTypesObj := map[string][]string{"entity_types": entityTypes}
+	predicatesObj := map[string][]string{"predicates": predicates}
+
+	etJSON, err := json.Marshal(entityTypesObj)
+	if err != nil {
+		return "", fmt.Errorf("enrich: build triplex message: marshal entity types: %w", err)
+	}
+	predJSON, err := json.Marshal(predicatesObj)
+	if err != nil {
+		return "", fmt.Errorf("enrich: build triplex message: marshal predicates: %w", err)
+	}
+
+	msg := fmt.Sprintf(`Perform Named Entity Recognition (NER) and extract knowledge graph triplets from the text. NER identifies named entities of given entity types, and triple extraction identifies relationships between entities using specified predicates.
+
+**Entity Types:**
+%s
+
+**Predicates:**
+%s
+
+**Text:**
+%s`, string(etJSON), string(predJSON), body)
+
+	return msg, nil
+}
+
+// parseTriplexOutput parses the entities_and_triples output format from Triplex.
+func parseTriplexOutput(content string) (*ModelResult, error) {
+	// Strip markdown code fences if present.
+	content = strings.TrimSpace(content)
+	if strings.HasPrefix(content, "```") {
+		lines := strings.Split(content, "\n")
+		if len(lines) >= 3 {
+			content = strings.Join(lines[1:len(lines)-1], "\n")
+		}
+	}
+	content = strings.TrimSpace(content)
+
+	var raw struct {
+		EntitiesAndTriples []string `json:"entities_and_triples"`
+	}
+	if err := json.Unmarshal([]byte(content), &raw); err != nil {
+		return nil, fmt.Errorf("parse triplex output: %w", err)
+	}
+
+	var result ModelResult
+	entityIndex := make(map[string]string) // index → entity name
+	entityTypeCounts := make(map[string]int)
+
+	// First pass: collect entities (items starting with "[").
+	for _, item := range raw.EntitiesAndTriples {
+		if !strings.HasPrefix(item, "[") {
+			continue
+		}
+		// Format: "[1], PERSON:Alice Chen"
+		parts := strings.SplitN(item, "], ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		idx := strings.TrimPrefix(parts[0], "[")
+		rest := parts[1]
+
+		nameParts := strings.SplitN(rest, ":", 2)
+		if len(nameParts) != 2 {
+			continue
+		}
+		entityType := strings.TrimSpace(nameParts[0])
+		name := strings.TrimSpace(nameParts[1])
+
+		entityIndex[idx] = name
+		entityTypeCounts[entityType]++
+		result.Entities = append(result.Entities, schema.Entity{Name: name, Role: entityType})
+	}
+
+	// Second pass: collect relationships (items starting with "(").
+	for _, item := range raw.EntitiesAndTriples {
+		if !strings.HasPrefix(item, "(") {
+			continue
+		}
+		// Format: "(1, WORKS_FOR, 2)"
+		stripped := strings.TrimPrefix(item, "(")
+		stripped = strings.TrimSuffix(stripped, ")")
+		tripParts := strings.Split(stripped, ", ")
+		if len(tripParts) != 3 {
+			continue
+		}
+		subjectIdx := strings.TrimSpace(tripParts[0])
+		predicate := strings.TrimSpace(tripParts[1])
+		objectIdx := strings.TrimSpace(tripParts[2])
+
+		_, subjectOK := entityIndex[subjectIdx]
+		targetName, objectOK := entityIndex[objectIdx]
+		if !subjectOK || !objectOK {
+			continue
+		}
+
+		result.Relationships = append(result.Relationships, schema.Relationship{
+			Target:   targetName,
+			Type:     predicate,
+			Strength: 0.8,
+		})
+	}
+
+	// Set EntityType to the most-frequent entity type among parsed entities.
+	bestType := ""
+	bestCount := 0
+	for et, count := range entityTypeCounts {
+		if count > bestCount || (count == bestCount && bestType == "") {
+			bestType = et
+			bestCount = count
+		}
+	}
+	result.EntityType = strings.ToLower(bestType)
+
+	return &result, nil
+}
+
 // GenerateSummary calls the model to produce a one-sentence entity description.
 // title, entityType, and tags provide context; bodyPreview is the first ~500 tokens of body.
 func (m *ModelExtractor) GenerateSummary(ctx context.Context, title, entityType string, tags []string, bodyPreview string) (string, error) {
@@ -210,47 +365,13 @@ Reply with ONLY the summary sentence, no quotes or formatting.`, title, entityTy
 		},
 	}
 
-	jsonBody, err := json.Marshal(reqBody)
+	content, err := m.sendChatRequest(ctx, reqBody)
 	if err != nil {
-		return "", fmt.Errorf("enrich: marshal summary request: %w", err)
+		// Wrap with summary-specific context to preserve existing error message patterns.
+		return "", fmt.Errorf("enrich: summary %w", err)
 	}
 
-	endpoint := strings.TrimRight(m.cfg.Endpoint, "/") + "/v1/chat/completions"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(jsonBody))
-	if err != nil {
-		return "", fmt.Errorf("enrich: create summary request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	if m.cfg.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+m.cfg.APIKey)
-	}
-
-	resp, err := m.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("enrich: summary request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("enrich: read summary response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("enrich: summary model returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var chatResp chatResponse
-	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return "", fmt.Errorf("enrich: unmarshal summary response: %w", err)
-	}
-
-	if len(chatResp.Choices) == 0 {
-		return "", fmt.Errorf("enrich: summary model returned no choices")
-	}
-
-	summary := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+	summary := strings.TrimSpace(content)
 	// Strip surrounding quotes if the model wrapped it.
 	summary = strings.Trim(summary, "\"'")
 	return summary, nil

@@ -175,6 +175,7 @@ func TestEnrichExtractTriplex(t *testing.T) {
 	extractor := enrich.NewModelExtractor(enrich.ModelConfig{
 		Endpoint: endpoint,
 		Model:    model,
+		Format:   enrich.FormatTriplex,
 	})
 
 	page, err := markdown.ParseFile("testdata/valid/alice.md")

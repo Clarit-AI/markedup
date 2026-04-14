@@ -222,6 +222,107 @@ func TestGenerateSummary_APIError(t *testing.T) {
 	assert.Contains(t, err.Error(), "status 500")
 }
 
+func TestModelExtractor_Extract_TriplexFormat(t *testing.T) {
+	triplexPayload := `{"entities_and_triples": ["[1], PERSON:Alice Chen", "[2], ORGANIZATION:LucidityLabs", "[3], CONCEPT:knowledge graphs", "(1, WORKS_FOR, 2)", "(1, RESEARCHES, 3)"]}`
+
+	var capturedReq chatRequest
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedReq))
+
+		resp := chatResponse{
+			Choices: []chatChoice{
+				{Message: chatMessage{Role: "assistant", Content: triplexPayload}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	extractor := NewModelExtractor(ModelConfig{
+		Endpoint: server.URL,
+		Model:    "triplex",
+		Format:   FormatTriplex,
+	})
+
+	result, err := extractor.Extract(context.Background(), "Alice Chen works at LucidityLabs researching knowledge graphs.", nil, nil)
+	require.NoError(t, err)
+
+	// Verify request has NO system message — only a single user message.
+	assert.Len(t, capturedReq.Messages, 1)
+	assert.Equal(t, "user", capturedReq.Messages[0].Role)
+	assert.True(t, strings.HasPrefix(capturedReq.Messages[0].Content, "Perform Named Entity Recognition"),
+		"user message should start with the NER preamble")
+
+	// Verify parsed result.
+	require.Len(t, result.Entities, 3)
+	require.Len(t, result.Relationships, 2)
+
+	// Check Alice Chen entity exists.
+	names := make([]string, 0, len(result.Entities))
+	for _, e := range result.Entities {
+		names = append(names, e.Name)
+	}
+	assert.Contains(t, names, "Alice Chen")
+
+	// Check WORKS_FOR relationship exists.
+	relTypes := make([]string, 0, len(result.Relationships))
+	for _, r := range result.Relationships {
+		relTypes = append(relTypes, r.Type)
+	}
+	assert.Contains(t, relTypes, "WORKS_FOR")
+}
+
+func TestModelExtractor_TriplexEntityOnly(t *testing.T) {
+	triplexPayload := `{"entities_and_triples": ["[1], PERSON:Bob", "[2], CONCEPT:graphs"]}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := chatResponse{
+			Choices: []chatChoice{
+				{Message: chatMessage{Role: "assistant", Content: triplexPayload}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	extractor := NewModelExtractor(ModelConfig{
+		Endpoint: server.URL,
+		Model:    "triplex",
+		Format:   FormatTriplex,
+	})
+
+	result, err := extractor.Extract(context.Background(), "Bob studies graphs.", nil, nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Entities, 2)
+	assert.Empty(t, result.Relationships)
+}
+
+func TestModelExtractor_TriplexMalformedOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := chatResponse{
+			Choices: []chatChoice{
+				{Message: chatMessage{Role: "assistant", Content: "not json at all"}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	extractor := NewModelExtractor(ModelConfig{
+		Endpoint: server.URL,
+		Model:    "triplex",
+		Format:   FormatTriplex,
+	})
+
+	_, err := extractor.Extract(context.Background(), "some text", nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse triplex output")
+}
+
 func TestBodyPreview(t *testing.T) {
 	short := "a few words only"
 	assert.Equal(t, short, BodyPreview(short, 500))
