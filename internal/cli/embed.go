@@ -51,6 +51,17 @@ func runEmbed(cmd *cobra.Command, args []string) error {
 		return runEmbedStatus(cmd)
 	}
 
+	// Fall back to config values when CLI flags are empty.
+	if embedEndpoint == "" {
+		embedEndpoint = appConfig.Embed.Endpoint
+	}
+	if embedModel == "" {
+		embedModel = appConfig.Embed.Model
+	}
+	if embedAPIKey == "" {
+		embedAPIKey = appConfig.Embed.APIKey
+	}
+
 	if embedEndpoint == "" {
 		return fmt.Errorf("no embedding endpoint configured\n\n" +
 			"Configure an endpoint with the --endpoint flag:\n" +

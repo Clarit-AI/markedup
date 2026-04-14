@@ -99,6 +99,30 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Fall back to config values when CLI flags are empty.
+	// Use Triplex config if available, otherwise fall back to LLM config.
+	if enrichEndpoint == "" {
+		if appConfig.Triplex.Endpoint != "" {
+			enrichEndpoint = appConfig.Triplex.Endpoint
+		} else {
+			enrichEndpoint = appConfig.LLM.Endpoint
+		}
+	}
+	if enrichModel == "" {
+		if appConfig.Triplex.Model != "" {
+			enrichModel = appConfig.Triplex.Model
+		} else {
+			enrichModel = appConfig.LLM.Model
+		}
+	}
+	if enrichAPIKey == "" {
+		if appConfig.Triplex.APIKey != "" {
+			enrichAPIKey = appConfig.Triplex.APIKey
+		} else {
+			enrichAPIKey = appConfig.LLM.APIKey
+		}
+	}
+
 	// Set up Tier 2 model extractor if --model is specified.
 	var modelExtractor *enrich.ModelExtractor
 	var entityTypes, predicates []string

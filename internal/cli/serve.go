@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/KHAEntertainment/markedup/cache"
@@ -40,15 +39,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	srv := &mcpServer{idx: result.Index, path: path}
 
-	// Initialize LLM client from environment variables if configured.
-	if ep := os.Getenv("MARKEDUP_LLM_ENDPOINT"); ep != "" {
-		if model := os.Getenv("MARKEDUP_LLM_MODEL"); model != "" {
-			srv.llmClient = llm.NewClient(llm.Config{
-				Endpoint: ep,
-				Model:    model,
-				APIKey:   os.Getenv("MARKEDUP_LLM_API_KEY"),
-			})
-		}
+	// Initialize LLM client from config if configured.
+	if appConfig.LLM.Endpoint != "" && appConfig.LLM.Model != "" {
+		srv.llmClient = llm.NewClient(llm.Config{
+			Endpoint: appConfig.LLM.Endpoint,
+			Model:    appConfig.LLM.Model,
+			APIKey:   appConfig.LLM.APIKey,
+		})
 	}
 
 	s := server.NewMCPServer("markedup", "0.1.0",
@@ -168,15 +165,11 @@ func (s *mcpServer) toolSearch(ctx context.Context, request mcp.CallToolRequest)
 	searchOpts = append(searchOpts, index.WithContext(ctx))
 
 	if params.Semantic {
-		embedEndpoint := os.Getenv("MARKEDUP_EMBED_ENDPOINT")
-		embedModel := os.Getenv("MARKEDUP_EMBED_MODEL")
-		embedAPIKey := os.Getenv("MARKEDUP_EMBED_API_KEY")
-
-		if embedEndpoint != "" && embedModel != "" {
+		if appConfig.Embed.Endpoint != "" && appConfig.Embed.Model != "" {
 			emb := embed.NewOpenAICompatible(embed.Config{
-				Endpoint:  embedEndpoint,
-				ModelName: embedModel,
-				APIKey:    embedAPIKey,
+				Endpoint:  appConfig.Embed.Endpoint,
+				ModelName: appConfig.Embed.Model,
+				APIKey:    appConfig.Embed.APIKey,
 			})
 			vc := cache.NewVectorCache(".")
 			searchOpts = append(searchOpts,
@@ -187,17 +180,12 @@ func (s *mcpServer) toolSearch(ctx context.Context, request mcp.CallToolRequest)
 	}
 
 	if params.Rerank {
-		rerankEndpoint := os.Getenv("MARKEDUP_RERANK_ENDPOINT")
-		rerankModel := os.Getenv("MARKEDUP_RERANK_MODEL")
-		rerankAPIKey := os.Getenv("MARKEDUP_RERANK_API_KEY")
-		rerankFormat := parseRerankFormat(os.Getenv("MARKEDUP_RERANK_FORMAT"))
-
-		if rerankEndpoint != "" && rerankModel != "" {
+		if appConfig.Rerank.Endpoint != "" && appConfig.Rerank.Model != "" {
 			rr := rerank.NewCrossEncoder(rerank.Config{
-				Endpoint: rerankEndpoint,
-				Model:    rerankModel,
-				APIKey:   rerankAPIKey,
-				Format:   rerankFormat,
+				Endpoint: appConfig.Rerank.Endpoint,
+				Model:    appConfig.Rerank.Model,
+				APIKey:   appConfig.Rerank.APIKey,
+				Format:   parseRerankFormat(appConfig.Rerank.Format),
 			})
 			searchOpts = append(searchOpts, index.WithReranker(rr))
 		}
