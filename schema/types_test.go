@@ -54,6 +54,7 @@ func TestGraphFrontmatter_YAMLRoundTrip(t *testing.T) {
 					Sources:   []string{"https://example.com/graphs", "textbook-ch3"},
 					CreatedBy: "agent-alpha",
 				},
+				Summary:           "Foundational concepts for building and understanding knowledge graphs",
 				SemanticHints:     []string{"foundational", "introductory"},
 				PossibleQuestions: []string{"What is a knowledge graph?", "How do nodes relate?"},
 			},
@@ -81,6 +82,7 @@ func TestGraphFrontmatter_YAMLRoundTrip(t *testing.T) {
 					Sources:   []string{"https://example.com/graphs", "textbook-ch3"},
 					CreatedBy: "agent-alpha",
 				},
+				Summary:           "Foundational concepts for building and understanding knowledge graphs",
 				SemanticHints:     []string{"foundational", "introductory"},
 				PossibleQuestions: []string{"What is a knowledge graph?", "How do nodes relate?"},
 			},
@@ -167,6 +169,38 @@ func TestGraphFrontmatter_YAMLRoundTrip(t *testing.T) {
 			},
 		},
 		{
+			name: "summary field round-trip",
+			give: GraphFrontmatter{
+				ID:      "summary-test",
+				Summary: "AI researcher specializing in knowledge graphs",
+			},
+			want: GraphFrontmatter{
+				ID:                "summary-test",
+				Summary:           "AI researcher specializing in knowledge graphs",
+				Tags:              []string{},
+				Entities:          []Entity{},
+				Relationships:     []Relationship{},
+				Provenance:        Provenance{Sources: []string{}},
+				SemanticHints:     []string{},
+				PossibleQuestions: []string{},
+			},
+		},
+		{
+			name: "missing summary field is empty string",
+			give: GraphFrontmatter{
+				ID: "no-summary",
+			},
+			want: GraphFrontmatter{
+				ID:                "no-summary",
+				Tags:              []string{},
+				Entities:          []Entity{},
+				Relationships:     []Relationship{},
+				Provenance:        Provenance{Sources: []string{}},
+				SemanticHints:     []string{},
+				PossibleQuestions: []string{},
+			},
+		},
+		{
 			name: "entity aliases round-trip",
 			give: GraphFrontmatter{
 				ID: "alias-test",
@@ -223,6 +257,7 @@ func TestGraphFrontmatter_YAMLIdempotent(t *testing.T) {
 			Sources:   []string{"test"},
 			CreatedBy: "tester",
 		},
+		Summary:           "A test entity for stability verification",
 		SemanticHints:     []string{"hint"},
 		PossibleQuestions: []string{"question?"},
 	}

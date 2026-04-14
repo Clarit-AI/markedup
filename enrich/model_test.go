@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/KHAEntertainment/markedup/schema"
@@ -154,6 +155,83 @@ func TestModelExtractor_NoChoices(t *testing.T) {
 	assert.Contains(t, err.Error(), "no choices")
 }
 
+func TestGenerateSummary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
+
+		var req chatRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		assert.Equal(t, "test-model", req.Model)
+		assert.Len(t, req.Messages, 2)
+		assert.Contains(t, req.Messages[1].Content, "Alice Chen")
+
+		resp := chatResponse{
+			Choices: []chatChoice{
+				{Message: chatMessage{Role: "assistant", Content: "AI researcher specializing in knowledge graphs"}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	extractor := NewModelExtractor(ModelConfig{
+		Endpoint: server.URL,
+		Model:    "test-model",
+	})
+
+	summary, err := extractor.GenerateSummary(
+		context.Background(),
+		"Alice Chen",
+		"person",
+		[]string{"ai", "researcher"},
+		"Alice is a senior AI researcher...",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "AI researcher specializing in knowledge graphs", summary)
+}
+
+func TestGenerateSummary_StripsQuotes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := chatResponse{
+			Choices: []chatChoice{
+				{Message: chatMessage{Role: "assistant", Content: `"AI researcher specializing in knowledge graphs"`}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	extractor := NewModelExtractor(ModelConfig{Endpoint: server.URL, Model: "test"})
+	summary, err := extractor.GenerateSummary(context.Background(), "Alice", "person", nil, "body")
+	require.NoError(t, err)
+	assert.Equal(t, "AI researcher specializing in knowledge graphs", summary)
+}
+
+func TestGenerateSummary_APIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("error"))
+	}))
+	defer server.Close()
+
+	extractor := NewModelExtractor(ModelConfig{Endpoint: server.URL, Model: "test"})
+	_, err := extractor.GenerateSummary(context.Background(), "Test", "doc", nil, "body")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "status 500")
+}
+
+func TestBodyPreview(t *testing.T) {
+	short := "a few words only"
+	assert.Equal(t, short, BodyPreview(short, 500))
+
+	long := strings.Repeat("word ", 600)
+	preview := BodyPreview(long, 500)
+	words := strings.Fields(preview)
+	assert.Len(t, words, 500)
+}
+
 func TestMergeModelResult_Default(t *testing.T) {
 	existing := schema.GraphFrontmatter{
 		EntityType: "document",
@@ -181,6 +259,27 @@ func TestMergeModelResult_Default(t *testing.T) {
 	assert.Len(t, result.Relationships, 1)
 	assert.Equal(t, []string{"systems programming"}, result.SemanticHints)
 	assert.Equal(t, []string{"What is Go?"}, result.PossibleQuestions)
+}
+
+func TestMergeModelResult_SummaryDefault(t *testing.T) {
+	existing := schema.GraphFrontmatter{ID: "test"}
+	model := &ModelResult{Summary: "A test entity"}
+	result := MergeModelResult(existing, model, MergeOptions{})
+	assert.Equal(t, "A test entity", result.Summary)
+}
+
+func TestMergeModelResult_SummaryPreserved(t *testing.T) {
+	existing := schema.GraphFrontmatter{ID: "test", Summary: "Original"}
+	model := &ModelResult{Summary: "New"}
+	result := MergeModelResult(existing, model, MergeOptions{})
+	assert.Equal(t, "Original", result.Summary)
+}
+
+func TestMergeModelResult_SummaryForce(t *testing.T) {
+	existing := schema.GraphFrontmatter{ID: "test", Summary: "Original"}
+	model := &ModelResult{Summary: "New"}
+	result := MergeModelResult(existing, model, MergeOptions{Force: true})
+	assert.Equal(t, "New", result.Summary)
 }
 
 func TestMergeModelResult_Force(t *testing.T) {

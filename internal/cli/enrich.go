@@ -181,6 +181,20 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 			} else {
 				merged = enrich.MergeModelResult(merged, modelResult, opts)
 			}
+
+			// Generate summary (separate call for focused one-sentence output).
+			if merged.Summary == "" || enrichForce {
+				bodyPreview := enrich.BodyPreview(page.Body, 500)
+				summaryCtx, summaryCancel := context.WithTimeout(context.Background(), 1*time.Minute)
+				summary, summaryErr := modelExtractor.GenerateSummary(summaryCtx, merged.Title, merged.EntityType, merged.Tags, bodyPreview)
+				summaryCancel()
+
+				if summaryErr != nil {
+					fmt.Fprintf(out, "  Warning: summary generation failed for %s: %v\n", relPath, summaryErr)
+				} else {
+					merged = enrich.MergeSummary(merged, summary, opts)
+				}
+			}
 		}
 
 		if enrichDryRun {

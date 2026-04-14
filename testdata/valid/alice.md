@@ -2,6 +2,7 @@
 id: alice
 title: Alice Chen
 entity-type: person
+summary: "AI researcher at LucidityLabs specializing in knowledge graph construction and temporal reasoning"
 confidence: 0.95
 tags: [person, engineer, ai-researcher]
 entities:
