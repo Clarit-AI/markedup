@@ -14,8 +14,9 @@ import (
 )
 
 var (
-	searchSemantic bool
-	searchRerank   bool
+	searchSemantic    bool
+	searchRerank      bool
+	searchRerankFmt   string
 )
 
 func newSearchCmd() *cobra.Command {
@@ -31,6 +32,8 @@ func newSearchCmd() *cobra.Command {
 		"Enable semantic search using cached embeddings (requires prior embedding)")
 	cmd.Flags().BoolVar(&searchRerank, "rerank", false,
 		"Re-rank results using a cross-encoder model (requires endpoint config)")
+	cmd.Flags().StringVar(&searchRerankFmt, "rerank-format", "jina",
+		`Reranker API format: "jina" (default, also correct for TEI) or "openai"`)
 
 	return cmd
 }
@@ -88,6 +91,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 				Endpoint: rerankEndpoint,
 				Model:    rerankModel,
 				APIKey:   rerankAPIKey,
+				Format:   parseRerankFormat(searchRerankFmt),
 			})
 			searchOpts = append(searchOpts, index.WithReranker(rr))
 		}

@@ -160,6 +160,66 @@ Triplex can be served from the same LM Studio instance as the main LLM by loadin
 
 ---
 
+## Local Reranker Setup
+
+markedup supports local cross-encoder reranking via any server that exposes a `/v1/rerank` endpoint. The recommended approach is [Text Embeddings Inference (TEI)](https://github.com/huggingface/text-embeddings-inference) with the IBM Granite reranker model.
+
+### TEI with Granite Reranker
+
+1. **Pull and run TEI** with the Granite reranker checkpoint:
+
+   ```sh
+   # CPU (works on macOS / Linux)
+   docker run -p 8091:80 \
+     ghcr.io/huggingface/text-embeddings-inference:cpu-latest \
+     --model-id ibm-granite/granite-embedding-30m-english \
+     --revision refs/pr/2
+
+   # Or with a cross-encoder checkpoint:
+   docker run -p 8091:80 \
+     ghcr.io/huggingface/text-embeddings-inference:cpu-latest \
+     --model-id jinaai/jina-reranker-v2-base-multilingual
+   ```
+
+2. **Export the env vars**:
+
+   ```sh
+   export MARKEDUP_RERANK_ENDPOINT=http://127.0.0.1:8091
+   export MARKEDUP_RERANK_MODEL=jina-reranker-v2-base-multilingual
+   export MARKEDUP_RERANK_API_KEY=           # leave empty for local TEI
+   export MARKEDUP_RERANK_FORMAT=jina        # default; correct for TEI endpoints
+   ```
+
+3. **Verify** with the smoke test:
+
+   ```sh
+   ./scripts/smoke-test.sh
+   ```
+
+### Reranker Format Configuration
+
+The `MARKEDUP_RERANK_FORMAT` env var (for `markedup serve`) and `--rerank-format` CLI flag (for `markedup search`) control which API response format the reranker client uses:
+
+| Value    | Constant            | Use When                                      |
+|----------|---------------------|-----------------------------------------------|
+| `jina`   | `rerank.FormatJina` | TEI, infinity-emb, Jina AI cloud (default)    |
+| `openai` | `rerank.FormatOpenAI` | OpenAI-compatible reranker endpoints          |
+
+- **Default is `jina`** (backward compatible). TEI endpoints use the Jina format natively.
+- The CLI flag overrides the env var for `markedup search`; the env var is used by `markedup serve` (MCP server).
+
+### KHA-281 E2E Reference
+
+The KHA-281 test environment validated this setup:
+
+- **Server**: TEI at `127.0.0.1:8091` with Granite reranker
+- **Format**: `FormatJina` (default)
+- **Result**: alice scored 0.8085 relevance — test passed
+
+See `docs/test-results-20260413.md` for full E2E results.
+
+---
+
 ## Notes on Reranker
 
 The reranker uses the Jina API format (`/v1/rerank` with `{"query": ..., "documents": [...], "model": ...}`). infinity-emb supports this format natively when loaded with a compatible cross-encoder checkpoint (e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2` or `jinaai/jina-reranker-v2-base-multilingual`).
