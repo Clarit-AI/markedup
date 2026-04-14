@@ -317,3 +317,40 @@ func TestMCP_IndexFromTestdata(t *testing.T) {
 	assert.Equal(t, "Alice Chen", page.Frontmatter.Title)
 	assert.Equal(t, "person", page.Frontmatter.EntityType)
 }
+
+// ---------------------------------------------------------------------------
+// markedup_reason
+// ---------------------------------------------------------------------------
+
+func TestMCP_Reason_NoLLMEndpoint(t *testing.T) {
+	srv := testMCPServer(t)
+	ctx := context.Background()
+
+	// Ensure env vars are not set.
+	t.Setenv("MARKEDUP_LLM_ENDPOINT", "")
+	t.Setenv("MARKEDUP_LLM_MODEL", "")
+
+	result, err := srv.toolReason(ctx, callToolReq(map[string]any{"query": "who works with Alice?"}))
+	require.NoError(t, err, "missing env should return error result, not Go error")
+	require.NotNil(t, result, "result should not be nil")
+	require.True(t, result.IsError, "result should be an error when LLM is not configured")
+
+	text := resultText(t, result)
+	assert.Contains(t, text, "MARKEDUP_LLM_ENDPOINT", "error should mention the missing env var")
+}
+
+func TestMCP_Reason_ToolDef(t *testing.T) {
+	srv := testMCPServer(t)
+
+	def := srv.reasonToolDef()
+	assert.Equal(t, "markedup_reason", def.Name)
+	assert.NotEmpty(t, def.Description)
+
+	// Verify "query" is required.
+	assert.Contains(t, def.InputSchema.Required, "query",
+		"query should be a required parameter")
+
+	// Verify query property exists.
+	_, exists := def.InputSchema.Properties["query"]
+	assert.True(t, exists, "query property must be defined")
+}

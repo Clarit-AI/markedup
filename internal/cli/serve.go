@@ -8,6 +8,7 @@ import (
 
 	"github.com/KHAEntertainment/markedup/cache"
 	"github.com/KHAEntertainment/markedup/embed"
+	"github.com/KHAEntertainment/markedup/enrich"
 	"github.com/KHAEntertainment/markedup/index"
 	"github.com/KHAEntertainment/markedup/rerank"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -48,6 +49,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	s.AddTool(srv.getStructureToolDef(), srv.toolGetStructure)
 	s.AddTool(srv.embedStatusToolDef(), srv.toolEmbedStatus)
 	s.AddTool(srv.embedFileToolDef(), srv.toolEmbedFile)
+	s.AddTool(srv.reasonToolDef(), srv.toolReason)
 
 	return server.ServeStdio(s)
 }
@@ -315,6 +317,124 @@ func (s *mcpServer) toolEmbedFile(ctx context.Context, request mcp.CallToolReque
 		"path":       params.Path,
 		"dimensions": dims,
 		"status":     "embedded",
+	}
+	b, _ := json.MarshalIndent(result, "", "  ")
+	return mcp.NewToolResultText(string(b)), nil
+}
+
+func (s *mcpServer) reasonToolDef() mcp.Tool {
+	return mcp.NewTool("markedup_reason",
+		mcp.WithDescription("Use LLM reasoning over the knowledge graph structure to answer multi-hop, structural, and dependency queries. Returns reasoning trace and full content of selected pages. Requires MARKEDUP_LLM_ENDPOINT and MARKEDUP_LLM_MODEL to be set."),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("The question to reason about using the graph structure"),
+		),
+		mcp.WithNumber("max_pages",
+			mcp.Description("Maximum pages to include in graph context (default 20). Larger values give the LLM more context but use more tokens."),
+		),
+		mcp.WithBoolean("include_relationships",
+			mcp.Description("Include relationship edges in the graph context (default true)"),
+		),
+		mcp.WithBoolean("include_temporal",
+			mcp.Description("Include temporal metadata in the graph context (default false)"),
+		),
+	)
+}
+
+func (s *mcpServer) toolReason(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var params struct {
+		Query                string  `json:"query"`
+		MaxPages             float64 `json:"max_pages"`
+		IncludeRelationships *bool   `json:"include_relationships"`
+		IncludeTemporal      bool    `json:"include_temporal"`
+	}
+	if err := request.BindArguments(&params); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid arguments: %s", err.Error())), nil
+	}
+
+	llmEndpoint := os.Getenv("MARKEDUP_LLM_ENDPOINT")
+	llmModel := os.Getenv("MARKEDUP_LLM_MODEL")
+	llmAPIKey := os.Getenv("MARKEDUP_LLM_API_KEY")
+	if llmEndpoint == "" || llmModel == "" {
+		return mcp.NewToolResultError("LLM endpoint not configured. Set MARKEDUP_LLM_ENDPOINT and MARKEDUP_LLM_MODEL."), nil
+	}
+
+	maxPages := int(params.MaxPages)
+	if maxPages <= 0 {
+		maxPages = 20
+	}
+
+	// Build summary options. If the graph is larger than maxPages, use keyword
+	// search to pre-filter to the most relevant pages plus their 1-hop neighbors,
+	// then pass those IDs via WithIDFilter. When using an ID filter the set is
+	// already bounded, so we omit WithMaxPages.
+	var opts []index.SummaryOption
+
+	if s.idx.Pages() > maxPages {
+		results := index.Search(s.idx, params.Query, index.WithContext(ctx))
+		ids := make(map[string]struct{})
+		for _, r := range results {
+			ids[r.Page.Frontmatter.ID] = struct{}{}
+			// Add 1-hop relationship targets.
+			for _, rel := range r.Page.Frontmatter.Relationships {
+				ids[rel.Target] = struct{}{}
+			}
+		}
+		idList := make([]string, 0, len(ids))
+		for id := range ids {
+			idList = append(idList, id)
+		}
+		opts = append(opts, index.WithIDFilter(idList))
+	} else {
+		opts = append(opts, index.WithMaxPages(maxPages))
+	}
+
+	// include_relationships defaults to true; only disable if explicitly false.
+	if params.IncludeRelationships != nil && !*params.IncludeRelationships {
+		opts = append(opts, index.WithRelationships(false))
+	}
+	if params.IncludeTemporal {
+		opts = append(opts, index.WithTemporal(true))
+	}
+
+	summary := s.idx.CompactGraphSummary(opts...)
+	graphJSON, err := json.Marshal(summary)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal graph: %s", err.Error())), nil
+	}
+
+	reasoner := enrich.NewGraphReasoner(enrich.ReasonConfig{
+		Endpoint: llmEndpoint,
+		Model:    llmModel,
+		APIKey:   llmAPIKey,
+	})
+
+	reasonResult, err := reasoner.Reason(ctx, params.Query, string(graphJSON))
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Reasoning failed: %s", err.Error())), nil
+	}
+
+	// Fetch full page content for each selected ID.
+	type pageResult struct {
+		ID      string      `json:"id"`
+		Page    interface{} `json:"page,omitempty"`
+		Missing bool        `json:"missing,omitempty"`
+	}
+	pages := make([]pageResult, 0, len(reasonResult.PageIDs))
+	for _, id := range reasonResult.PageIDs {
+		p, ok := s.idx.Get(id)
+		if !ok {
+			pages = append(pages, pageResult{ID: id, Missing: true})
+			continue
+		}
+		pages = append(pages, pageResult{ID: id, Page: p})
+	}
+
+	result := map[string]interface{}{
+		"reasoning":          reasonResult.Thinking,
+		"selected_page_ids":  reasonResult.PageIDs,
+		"relationship_paths": reasonResult.RelationshipPaths,
+		"pages":              pages,
 	}
 	b, _ := json.MarshalIndent(result, "", "  ")
 	return mcp.NewToolResultText(string(b)), nil

@@ -28,6 +28,7 @@ type SummaryNode struct {
 	Title         string                `json:"title"`
 	EntityType    string                `json:"entity_type"`
 	Tags          []string              `json:"tags"`
+	Summary       string                `json:"summary,omitempty"`
 	Confidence    float64               `json:"confidence"`
 	Relationships []SummaryRelationship `json:"relationships,omitempty"`
 
@@ -51,6 +52,7 @@ type summaryConfig struct {
 	includeRels      bool
 	includeTemporal  bool
 	maxPages         int
+	idFilter         map[string]struct{} // if non-nil, only include pages whose IDs are in this set
 }
 
 // SummaryOption configures the behavior of CompactGraphSummary.
@@ -86,6 +88,21 @@ func WithMaxPages(n int) SummaryOption {
 	return func(c *summaryConfig) { c.maxPages = n }
 }
 
+// WithIDFilter restricts the summary to pages whose IDs are in the given set.
+// An empty or nil filter includes all pages (no restriction).
+func WithIDFilter(ids []string) SummaryOption {
+	return func(c *summaryConfig) {
+		if len(ids) == 0 {
+			c.idFilter = nil
+			return
+		}
+		c.idFilter = make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			c.idFilter[id] = struct{}{}
+		}
+	}
+}
+
 // CompactGraphSummary builds a token-efficient summary of the knowledge
 // graph. It is used by both the MCP markedup_get_structure tool and the
 // CLI export --compact command.
@@ -101,6 +118,11 @@ func (idx *KnowledgeIndex) CompactGraphSummary(opts ...SummaryOption) *GraphSumm
 	var filtered []*schema.Page
 	for _, id := range idx.sortedIDs {
 		p := idx.byID[id]
+		if cfg.idFilter != nil {
+			if _, ok := cfg.idFilter[id]; !ok {
+				continue
+			}
+		}
 		if cfg.entityTypeFilter != "" && p.Frontmatter.EntityType != cfg.entityTypeFilter {
 			continue
 		}
@@ -145,6 +167,7 @@ func (idx *KnowledgeIndex) CompactGraphSummary(opts ...SummaryOption) *GraphSumm
 			Title:      fm.Title,
 			EntityType: fm.EntityType,
 			Tags:       fm.Tags,
+			Summary:    fm.Summary,
 			Confidence: fm.Confidence,
 		}
 

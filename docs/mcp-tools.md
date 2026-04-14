@@ -439,9 +439,135 @@ If no embedder is configured, the response has `isError: true` with the message 
 
 ---
 
+### `markedup_get_structure`
+
+Get a compact summary of the knowledge graph structure without body text. Use this tool first to understand what pages and relationships exist, then use `markedup_get_page` to retrieve full content for specific pages.
+
+#### Parameters
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `filter_entity_type` | string | No | Filter to pages with this entity type (e.g. `person`, `concept`, `project`). |
+| `filter_tag` | string | No | Filter to pages containing this tag. |
+| `include_relationships` | boolean | No | Include relationship edges in each node (default `true`). |
+| `include_temporal` | boolean | No | Include temporal metadata (`valid-from`, `valid-until`, `last-verified`) in each node (default `false`). |
+
+#### Example Request
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 15,
+  "method": "tools/call",
+  "params": {
+    "name": "markedup_get_structure",
+    "arguments": {
+      "filter_entity_type": "person",
+      "include_relationships": true
+    }
+  }
+}
+```
+
+#### Example Response
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 15,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"stats\": {\"pages\": 2, \"relationships\": 3, \"entity_types\": [\"person\"], \"tags\": [\"engineer\"]},\n  \"pages\": [\n    {\"id\": \"alice\", \"title\": \"Alice Chen\", \"entity_type\": \"person\", \"tags\": [\"engineer\"], \"confidence\": 0.95, \"relationships\": [{\"target\": \"bob\", \"type\": \"colleague\", \"strength\": 0.9}]}\n  ]\n}"
+      }
+    ]
+  }
+}
+```
+
+The `text` field contains a JSON object with:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `stats.pages` | integer | Number of pages in the filtered result. |
+| `stats.relationships` | integer | Total relationships across filtered pages. |
+| `stats.entity_types` | array | Sorted list of distinct entity types. |
+| `stats.tags` | array | Sorted list of distinct tags. |
+| `pages` | array | Compact node list; each entry has `id`, `title`, `entity_type`, `tags`, `summary` (if set), `confidence`, and optionally `relationships` and temporal fields. |
+
+---
+
+### `markedup_reason`
+
+Use LLM reasoning over the knowledge graph structure to answer multi-hop, structural, and dependency queries. The tool builds a compact graph summary, sends it to a configured LLM with a graph navigation prompt, then returns the LLM's reasoning trace and the full content of pages it selected.
+
+This tool is most useful for queries like:
+- "Which researchers are connected to Alice through projects active in Q3 2024?"
+- "What are the main topic clusters in this knowledge base?"
+- "Which concept should I study first to understand X?"
+
+Requires `MARKEDUP_LLM_ENDPOINT` and `MARKEDUP_LLM_MODEL` environment variables.
+
+#### Parameters
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `query` | string | Yes | The question to reason about using the graph structure. |
+| `max_pages` | number | No | Maximum pages to include in graph context (default `20`). Larger values give the LLM more context but use more tokens. |
+| `include_relationships` | boolean | No | Include relationship edges in the graph context (default `true`). |
+| `include_temporal` | boolean | No | Include temporal metadata in the graph context (default `false`). |
+
+#### Example Request
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 16,
+  "method": "tools/call",
+  "params": {
+    "name": "markedup_reason",
+    "arguments": {
+      "query": "Which concepts does Alice study?",
+      "max_pages": 20
+    }
+  }
+}
+```
+
+#### Example Response
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 16,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"reasoning\": \"Alice has a 'studies' relationship to concept-graph with strength 0.8...\",\n  \"selected_page_ids\": [\"alice\", \"concept-graph\"],\n  \"relationship_paths\": [\"alice --studies--> concept-graph\"],\n  \"pages\": [\n    {\"id\": \"alice\", \"page\": {...}},\n    {\"id\": \"concept-graph\", \"page\": {...}}\n  ]\n}"
+      }
+    ]
+  }
+}
+```
+
+The `text` field contains a JSON object with:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `reasoning` | string | The LLM's thinking trace explaining which pages were selected and why. |
+| `selected_page_ids` | array | IDs of pages the LLM identified as relevant. |
+| `relationship_paths` | array | Relationship chains the LLM identified (e.g. `"id1 --studies--> id2"`). |
+| `pages` | array | Full page content for each selected ID. Each entry has `id` and `page` (the full page object), or `id` and `missing: true` if the ID was not found in the index. |
+
+If `MARKEDUP_LLM_ENDPOINT` or `MARKEDUP_LLM_MODEL` are not set, the response has `isError: true` with the message `LLM endpoint not configured. Set MARKEDUP_LLM_ENDPOINT and MARKEDUP_LLM_MODEL.`
+
+---
+
 ## Environment Variables
 
-The following environment variables configure optional embedding and reranking backends for `markedup_search` (with `semantic: true` or `rerank: true`) and `embed_file`:
+The following environment variables configure optional backends:
 
 | Variable | Description |
 |----------|-------------|
@@ -451,6 +577,9 @@ The following environment variables configure optional embedding and reranking b
 | `MARKEDUP_RERANK_ENDPOINT` | Reranker API endpoint (e.g. Jina, Cohere). |
 | `MARKEDUP_RERANK_MODEL` | Reranker model name. |
 | `MARKEDUP_RERANK_API_KEY` | API key for the reranker endpoint. |
+| `MARKEDUP_LLM_ENDPOINT` | LLM API endpoint for `markedup_reason` (OpenAI-compatible, e.g. `http://localhost:11434`). |
+| `MARKEDUP_LLM_MODEL` | LLM model name for `markedup_reason` (e.g. `llama3`, `gpt-4o`). |
+| `MARKEDUP_LLM_API_KEY` | API key for the LLM endpoint (optional for local backends). |
 
 ---
 
