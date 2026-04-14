@@ -26,6 +26,7 @@ type SummaryStats struct {
 type SummaryNode struct {
 	ID            string                `json:"id"`
 	Title         string                `json:"title"`
+	Summary       string                `json:"summary,omitempty"`
 	EntityType    string                `json:"entity_type"`
 	Tags          []string              `json:"tags"`
 	Confidence    float64               `json:"confidence"`
@@ -48,6 +49,7 @@ type SummaryRelationship struct {
 type summaryConfig struct {
 	entityTypeFilter string
 	tagFilter        string
+	pageIDFilter     []string
 	includeRels      bool
 	includeTemporal  bool
 	maxPages         int
@@ -86,6 +88,12 @@ func WithMaxPages(n int) SummaryOption {
 	return func(c *summaryConfig) { c.maxPages = n }
 }
 
+// WithPageIDs restricts the summary to pages whose ID is in the given slice.
+// An empty or nil slice means no restriction. Uses a map for O(1) lookup.
+func WithPageIDs(ids []string) SummaryOption {
+	return func(c *summaryConfig) { c.pageIDFilter = ids }
+}
+
 // CompactGraphSummary builds a token-efficient summary of the knowledge
 // graph. It is used by both the MCP markedup_get_structure tool and the
 // CLI export --compact command.
@@ -97,10 +105,24 @@ func (idx *KnowledgeIndex) CompactGraphSummary(opts ...SummaryOption) *GraphSumm
 		o(&cfg)
 	}
 
+	// Build page-ID filter set for O(1) lookup.
+	var pageIDSet map[string]struct{}
+	if len(cfg.pageIDFilter) > 0 {
+		pageIDSet = make(map[string]struct{}, len(cfg.pageIDFilter))
+		for _, id := range cfg.pageIDFilter {
+			pageIDSet[id] = struct{}{}
+		}
+	}
+
 	// Collect matching pages (deterministic order via sortedIDs).
 	var filtered []*schema.Page
 	for _, id := range idx.sortedIDs {
 		p := idx.byID[id]
+		if pageIDSet != nil {
+			if _, ok := pageIDSet[id]; !ok {
+				continue
+			}
+		}
 		if cfg.entityTypeFilter != "" && p.Frontmatter.EntityType != cfg.entityTypeFilter {
 			continue
 		}
@@ -143,6 +165,7 @@ func (idx *KnowledgeIndex) CompactGraphSummary(opts ...SummaryOption) *GraphSumm
 		node := SummaryNode{
 			ID:         fm.ID,
 			Title:      fm.Title,
+			Summary:    fm.Summary,
 			EntityType: fm.EntityType,
 			Tags:       fm.Tags,
 			Confidence: fm.Confidence,

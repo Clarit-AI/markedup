@@ -157,6 +157,60 @@ func TestCompactGraphSummary_NoMatchFilter(t *testing.T) {
 	assert.Empty(t, summary.Pages)
 }
 
+func TestCompactGraphSummary_SummaryField(t *testing.T) {
+	idx := loadTestIndex(t)
+	summary := idx.CompactGraphSummary()
+
+	// alice has a summary populated by the enrich pipeline.
+	for _, n := range summary.Pages {
+		if n.ID == "alice" {
+			assert.NotEmpty(t, n.Summary, "alice should have a summary")
+			assert.Contains(t, n.Summary, "AI researcher")
+			return
+		}
+	}
+	t.Fatal("alice not found in summary pages")
+}
+
+func TestCompactGraphSummary_WithPageIDs(t *testing.T) {
+	idx := loadTestIndex(t)
+
+	// Filter to only alice.
+	summary := idx.CompactGraphSummary(WithPageIDs([]string{"alice"}))
+	assert.Equal(t, 1, summary.Stats.Pages)
+	assert.Len(t, summary.Pages, 1)
+	assert.Equal(t, "alice", summary.Pages[0].ID)
+}
+
+func TestCompactGraphSummary_WithPageIDs_Multiple(t *testing.T) {
+	idx := loadTestIndex(t)
+
+	summary := idx.CompactGraphSummary(WithPageIDs([]string{"alice", "bob"}))
+	assert.Equal(t, 2, summary.Stats.Pages)
+	ids := make([]string, 0, len(summary.Pages))
+	for _, n := range summary.Pages {
+		ids = append(ids, n.ID)
+	}
+	assert.Contains(t, ids, "alice")
+	assert.Contains(t, ids, "bob")
+}
+
+func TestCompactGraphSummary_WithPageIDs_Empty(t *testing.T) {
+	idx := loadTestIndex(t)
+
+	// Empty slice means no restriction — all pages returned.
+	summary := idx.CompactGraphSummary(WithPageIDs([]string{}))
+	assert.Equal(t, idx.Pages(), summary.Stats.Pages)
+}
+
+func TestCompactGraphSummary_WithPageIDs_NonExistent(t *testing.T) {
+	idx := loadTestIndex(t)
+
+	summary := idx.CompactGraphSummary(WithPageIDs([]string{"nonexistent"}))
+	assert.Equal(t, 0, summary.Stats.Pages)
+	assert.Empty(t, summary.Pages)
+}
+
 func TestCompactGraphSummary_StatsEntityTypes(t *testing.T) {
 	idx := loadTestIndex(t)
 	summary := idx.CompactGraphSummary()
