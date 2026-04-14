@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/KHAEntertainment/markedup/llm"
 	"github.com/KHAEntertainment/markedup/schema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,7 +33,7 @@ func TestModelExtractor_Extract(t *testing.T) {
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		assert.Equal(t, "Bearer test-key", r.Header.Get("Authorization"))
 
-		var req chatRequest
+		var req llm.Request
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 		assert.Equal(t, "triplex", req.Model)
 		assert.Len(t, req.Messages, 2)
@@ -40,9 +41,9 @@ func TestModelExtractor_Extract(t *testing.T) {
 		assert.Equal(t, "user", req.Messages[1].Role)
 
 		resultJSON, _ := json.Marshal(modelResult)
-		resp := chatResponse{
-			Choices: []chatChoice{
-				{Message: chatMessage{Role: "assistant", Content: string(resultJSON)}},
+		resp := llm.Response{
+			Choices: []llm.Choice{
+				{Message: llm.Message{Role: "assistant", Content: string(resultJSON)}},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -78,9 +79,9 @@ func TestModelExtractor_CodeFencedResponse(t *testing.T) {
 		// Wrap in code fences like some models do.
 		fenced := "```json\n" + string(resultJSON) + "\n```"
 
-		resp := chatResponse{
-			Choices: []chatChoice{
-				{Message: chatMessage{Role: "assistant", Content: fenced}},
+		resp := llm.Response{
+			Choices: []llm.Choice{
+				{Message: llm.Message{Role: "assistant", Content: fenced}},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -117,9 +118,9 @@ func TestModelExtractor_APIError(t *testing.T) {
 
 func TestModelExtractor_MalformedJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := chatResponse{
-			Choices: []chatChoice{
-				{Message: chatMessage{Role: "assistant", Content: "not valid json at all"}},
+		resp := llm.Response{
+			Choices: []llm.Choice{
+				{Message: llm.Message{Role: "assistant", Content: "not valid json at all"}},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -139,7 +140,7 @@ func TestModelExtractor_MalformedJSON(t *testing.T) {
 
 func TestModelExtractor_NoChoices(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := chatResponse{Choices: []chatChoice{}}
+		resp := llm.Response{Choices: []llm.Choice{}}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}))
@@ -159,15 +160,15 @@ func TestGenerateSummary(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
 
-		var req chatRequest
+		var req llm.Request
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 		assert.Equal(t, "test-model", req.Model)
 		assert.Len(t, req.Messages, 2)
 		assert.Contains(t, req.Messages[1].Content, "Alice Chen")
 
-		resp := chatResponse{
-			Choices: []chatChoice{
-				{Message: chatMessage{Role: "assistant", Content: "AI researcher specializing in knowledge graphs"}},
+		resp := llm.Response{
+			Choices: []llm.Choice{
+				{Message: llm.Message{Role: "assistant", Content: "AI researcher specializing in knowledge graphs"}},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -193,9 +194,9 @@ func TestGenerateSummary(t *testing.T) {
 
 func TestGenerateSummary_StripsQuotes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := chatResponse{
-			Choices: []chatChoice{
-				{Message: chatMessage{Role: "assistant", Content: `"AI researcher specializing in knowledge graphs"`}},
+		resp := llm.Response{
+			Choices: []llm.Choice{
+				{Message: llm.Message{Role: "assistant", Content: `"AI researcher specializing in knowledge graphs"`}},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -225,14 +226,14 @@ func TestGenerateSummary_APIError(t *testing.T) {
 func TestModelExtractor_Extract_TriplexFormat(t *testing.T) {
 	triplexPayload := `{"entities_and_triples": ["[1], PERSON:Alice Chen", "[2], ORGANIZATION:LucidityLabs", "[3], CONCEPT:knowledge graphs", "(1, WORKS_FOR, 2)", "(1, RESEARCHES, 3)"]}`
 
-	var capturedReq chatRequest
+	var capturedReq llm.Request
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedReq))
 
-		resp := chatResponse{
-			Choices: []chatChoice{
-				{Message: chatMessage{Role: "assistant", Content: triplexPayload}},
+		resp := llm.Response{
+			Choices: []llm.Choice{
+				{Message: llm.Message{Role: "assistant", Content: triplexPayload}},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -278,9 +279,9 @@ func TestModelExtractor_TriplexEntityOnly(t *testing.T) {
 	triplexPayload := `{"entities_and_triples": ["[1], PERSON:Bob", "[2], CONCEPT:graphs"]}`
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := chatResponse{
-			Choices: []chatChoice{
-				{Message: chatMessage{Role: "assistant", Content: triplexPayload}},
+		resp := llm.Response{
+			Choices: []llm.Choice{
+				{Message: llm.Message{Role: "assistant", Content: triplexPayload}},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -302,9 +303,9 @@ func TestModelExtractor_TriplexEntityOnly(t *testing.T) {
 
 func TestModelExtractor_TriplexMalformedOutput(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := chatResponse{
-			Choices: []chatChoice{
-				{Message: chatMessage{Role: "assistant", Content: "not json at all"}},
+		resp := llm.Response{
+			Choices: []llm.Choice{
+				{Message: llm.Message{Role: "assistant", Content: "not json at all"}},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")

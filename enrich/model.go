@@ -1,14 +1,13 @@
 package enrich
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
+	"github.com/KHAEntertainment/markedup/llm"
 	"github.com/KHAEntertainment/markedup/schema"
 )
 
@@ -41,17 +40,19 @@ type ModelConfig struct {
 
 // ModelExtractor calls a chat-completion API to extract structured knowledge.
 type ModelExtractor struct {
-	cfg    ModelConfig
-	client *http.Client
+	cfg       ModelConfig
+	llmClient *llm.Client
 }
 
 // NewModelExtractor creates a new model extractor with the given config.
 func NewModelExtractor(cfg ModelConfig) *ModelExtractor {
-	client := cfg.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	return &ModelExtractor{cfg: cfg, client: client}
+	llmClient := llm.NewClient(llm.Config{
+		Endpoint:   cfg.Endpoint,
+		Model:      cfg.Model,
+		APIKey:     cfg.APIKey,
+		HTTPClient: cfg.HTTPClient,
+	})
+	return &ModelExtractor{cfg: cfg, llmClient: llmClient}
 }
 
 // ModelResult holds Tier 2 extraction output.
@@ -79,13 +80,10 @@ func (m *ModelExtractor) Extract(ctx context.Context, body string, entityTypes, 
 		if err != nil {
 			return nil, err
 		}
-		req := chatRequest{
-			Model: m.cfg.Model,
-			Messages: []chatMessage{
-				{Role: "user", Content: userMsg},
-			},
+		messages := []llm.Message{
+			{Role: "user", Content: userMsg},
 		}
-		content, err := m.sendChatRequest(ctx, req)
+		content, err := m.llmClient.ChatCompletion(ctx, messages)
 		if err != nil {
 			return nil, err
 		}
@@ -94,83 +92,16 @@ func (m *ModelExtractor) Extract(ctx context.Context, body string, entityTypes, 
 
 	systemPrompt := buildSystemPrompt(entityTypes, predicates)
 
-	req := chatRequest{
-		Model: m.cfg.Model,
-		Messages: []chatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: body},
-		},
+	messages := []llm.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: body},
 	}
 
-	content, err := m.sendChatRequest(ctx, req)
+	content, err := m.llmClient.ChatCompletion(ctx, messages)
 	if err != nil {
 		return nil, err
 	}
 	return parseModelOutput(content)
-}
-
-// sendChatRequest sends a chat completion request and returns the first choice's content.
-func (m *ModelExtractor) sendChatRequest(ctx context.Context, reqBody chatRequest) (string, error) {
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("enrich: marshal request: %w", err)
-	}
-
-	endpoint := strings.TrimRight(m.cfg.Endpoint, "/") + "/v1/chat/completions"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(jsonBody))
-	if err != nil {
-		return "", fmt.Errorf("enrich: create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	if m.cfg.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+m.cfg.APIKey)
-	}
-
-	resp, err := m.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("enrich: model request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("enrich: read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("enrich: model returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var chatResp chatResponse
-	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return "", fmt.Errorf("enrich: unmarshal response: %w", err)
-	}
-
-	if len(chatResp.Choices) == 0 {
-		return "", fmt.Errorf("enrich: model returned no choices")
-	}
-
-	return chatResp.Choices[0].Message.Content, nil
-}
-
-// chatRequest is the OpenAI-compatible chat completion request.
-type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-}
-
-type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type chatResponse struct {
-	Choices []chatChoice `json:"choices"`
-}
-
-type chatChoice struct {
-	Message chatMessage `json:"message"`
 }
 
 func buildSystemPrompt(entityTypes, predicates []string) string {
@@ -357,15 +288,12 @@ Body (first 500 tokens): %s
 
 Reply with ONLY the summary sentence, no quotes or formatting.`, title, entityType, tagsStr, bodyPreview)
 
-	reqBody := chatRequest{
-		Model: m.cfg.Model,
-		Messages: []chatMessage{
-			{Role: "system", Content: "You are a concise knowledge graph summarizer. Generate one-sentence entity descriptions."},
-			{Role: "user", Content: prompt},
-		},
+	messages := []llm.Message{
+		{Role: "system", Content: "You are a concise knowledge graph summarizer. Generate one-sentence entity descriptions."},
+		{Role: "user", Content: prompt},
 	}
 
-	content, err := m.sendChatRequest(ctx, reqBody)
+	content, err := m.llmClient.ChatCompletion(ctx, messages)
 	if err != nil {
 		// Wrap with summary-specific context to preserve existing error message patterns.
 		return "", fmt.Errorf("enrich: summary %w", err)
