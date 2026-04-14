@@ -16,6 +16,8 @@ markedup serve [path]
 - The server loads the knowledge index from the given path, then enters a read-eval-print loop on stdio.
 - One JSON-RPC request per line; responses are written one per line.
 
+**Configuration:** The server reads endpoint and model settings from `.markedup.yaml` (global at `~/.markedup.yaml` or local at `<path>/.markedup.yaml`). Alternatively, set `MARKEDUP_*` environment variables (e.g. `MARKEDUP_LLM_ENDPOINT`, `MARKEDUP_EMBED_MODEL`). Environment variables override config file values. Run `markedup setup` to generate a config file interactively.
+
 ---
 
 ## Protocol Overview

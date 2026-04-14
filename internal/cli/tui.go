@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/KHAEntertainment/markedup/config"
 	"github.com/KHAEntertainment/markedup/index"
 	"github.com/KHAEntertainment/markedup/internal/tui"
+	"github.com/KHAEntertainment/markedup/internal/tui/setup"
 	"github.com/spf13/cobra"
 )
 
@@ -27,6 +29,20 @@ func newTUICmd() *cobra.Command {
 }
 
 func runTUI(dir string) error {
+	// First-run detection: launch setup wizard if no config exists.
+	if !config.Exists(dir) {
+		cfg, err := setup.Run()
+		if err != nil {
+			return err
+		}
+		if cfg != nil {
+			if err := config.Save(cfg, config.GlobalPath()); err != nil {
+				return fmt.Errorf("saving config: %w", err)
+			}
+			appConfig = cfg
+		}
+	}
+
 	result, err := index.Load(context.Background(), dir, index.WithIgnoreErrors(true))
 	if err != nil {
 		return fmt.Errorf("failed to load %s: %w", dir, err)

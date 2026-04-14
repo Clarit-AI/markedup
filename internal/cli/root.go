@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/KHAEntertainment/markedup/config"
@@ -25,6 +26,11 @@ func newRootCmd() *cobra.Command {
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			isTTY = isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
 			appConfig, _ = config.Load(".")
+
+			if !config.Exists(".") && isTTY {
+				fmt.Println("No configuration found. Run 'markedup setup' to configure, or set MARKEDUP_* env vars.")
+				fmt.Println()
+			}
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
