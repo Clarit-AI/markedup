@@ -175,12 +175,14 @@ func (s *mcpServer) toolSearch(ctx context.Context, request mcp.CallToolRequest)
 		rerankEndpoint := os.Getenv("MARKEDUP_RERANK_ENDPOINT")
 		rerankModel := os.Getenv("MARKEDUP_RERANK_MODEL")
 		rerankAPIKey := os.Getenv("MARKEDUP_RERANK_API_KEY")
+		rerankFormat := parseRerankFormat(os.Getenv("MARKEDUP_RERANK_FORMAT"))
 
 		if rerankEndpoint != "" && rerankModel != "" {
 			rr := rerank.NewCrossEncoder(rerank.Config{
 				Endpoint: rerankEndpoint,
 				Model:    rerankModel,
 				APIKey:   rerankAPIKey,
+				Format:   rerankFormat,
 			})
 			searchOpts = append(searchOpts, index.WithReranker(rr))
 		}
