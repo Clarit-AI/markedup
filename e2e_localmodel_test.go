@@ -4,6 +4,8 @@ package markedup_test
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"os"
@@ -13,6 +15,8 @@ import (
 
 	"github.com/KHAEntertainment/markedup/embed"
 	"github.com/KHAEntertainment/markedup/enrich"
+	"github.com/KHAEntertainment/markedup/index"
+	"github.com/KHAEntertainment/markedup/llm"
 	"github.com/KHAEntertainment/markedup/markdown"
 	"github.com/KHAEntertainment/markedup/rerank"
 	"github.com/stretchr/testify/assert"
@@ -239,6 +243,101 @@ func TestRerankLocalModel(t *testing.T) {
 
 	t.Logf("rerank OK: model=%s results=%d top=%q score=%.4f",
 		model, len(results), results[0].ID, results[0].Score)
+}
+
+// TestReasonLocalModel tests the markedup_reason LLM graph reasoning pipeline
+// against a local chat completion endpoint. It loads the testdata/valid index,
+// builds a graph summary, sends a reasoning prompt, and validates the response.
+// Set MARKEDUP_LLM_ENDPOINT and MARKEDUP_LLM_MODEL.
+func TestReasonLocalModel(t *testing.T) {
+	endpoint := skipIfNoEndpoint(t, "MARKEDUP_LLM_ENDPOINT")
+
+	model := os.Getenv("MARKEDUP_LLM_MODEL")
+	if model == "" {
+		t.Skip("skipping: MARKEDUP_LLM_MODEL not set")
+	}
+
+	// Load testdata/valid index.
+	result, err := index.Load(context.Background(), "testdata/valid", index.WithIgnoreErrors(true))
+	require.NoError(t, err, "failed to load testdata/valid")
+	require.NotNil(t, result.Index, "loaded index should not be nil")
+
+	idx := result.Index
+
+	// Build compact graph summary (same as toolReason).
+	summary := idx.CompactGraphSummary()
+	graphJSON, err := json.Marshal(summary)
+	require.NoError(t, err, "failed to marshal graph summary")
+
+	// Build the same prompt as toolReason in serve.go.
+	query := "Who works with Alice on knowledge graph research?"
+	userPrompt := fmt.Sprintf(`You are given a question and the structure of a knowledge graph.
+Each node represents a markdown page with metadata. Edges represent typed relationships between pages.
+
+Your task: identify which pages are most likely to contain or contribute to answering the question.
+Consider relationship chains, entity types, temporal validity, and confidence scores.
+
+Question: %s
+
+Knowledge graph structure:
+%s
+
+Reply in JSON:
+{
+  "thinking": "Your reasoning about which pages are relevant and why, considering the graph structure",
+  "page_ids": ["id1", "id2"],
+  "relationship_paths": ["id1 --type--> id2"]
+}`, query, string(graphJSON))
+
+	messages := []llm.Message{
+		{Role: "system", Content: "You are a knowledge graph reasoning assistant."},
+		{Role: "user", Content: userPrompt},
+	}
+
+	client := llm.NewClient(llm.Config{
+		Endpoint: endpoint,
+		Model:    model,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	content, err := client.ChatCompletion(ctx, messages)
+	require.NoError(t, err, "ChatCompletion() must not error")
+	require.NotEmpty(t, content, "LLM response must not be empty")
+
+	// Parse response with lenient JSON handling (strip markdown fences).
+	cleaned := strings.TrimSpace(content)
+	if strings.HasPrefix(cleaned, "```") {
+		lines := strings.Split(cleaned, "\n")
+		if len(lines) >= 3 {
+			cleaned = strings.Join(lines[1:len(lines)-1], "\n")
+		}
+	}
+	cleaned = strings.TrimSpace(cleaned)
+
+	type reasoningLLMResponse struct {
+		Thinking          string   `json:"thinking"`
+		PageIDs           []string `json:"page_ids"`
+		RelationshipPaths []string `json:"relationship_paths"`
+	}
+
+	var llmResp reasoningLLMResponse
+	err = json.Unmarshal([]byte(cleaned), &llmResp)
+	if err != nil {
+		// Small models may produce imperfect JSON — log raw output for debugging.
+		t.Fatalf("failed to parse LLM response as JSON: %v\nRaw output: %s", err, content)
+	}
+
+	// Assert: non-empty thinking.
+	assert.NotEmpty(t, llmResp.Thinking, "thinking field must not be empty")
+
+	// Assert: page_ids includes "alice".
+	assert.Contains(t, llmResp.PageIDs, "alice",
+		"page_ids should include 'alice' for a query about Alice; got: %v", llmResp.PageIDs)
+
+	t.Logf("reason OK: model=%s thinking_len=%d pages=%d",
+		model, len(llmResp.Thinking), len(llmResp.PageIDs))
 }
 
 // TestSearchSemanticLocalModel: see embed command for full pipeline test.
