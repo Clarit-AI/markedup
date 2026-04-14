@@ -101,18 +101,28 @@
 - [x] KHA-278: `markedup_reason` MCP tool — LLM graph reasoning (PR #60, merged 2026-04-14)
 - [x] E2E test for `markedup_reason` (PR #61, merged 2026-04-14)
 
+### Wave 3 — Setup Wizard + Config System (KHA-279)
+- [x] config/ package — structs, Load, Save, cascade (PR #75, merged 2026-04-14)
+- [x] config/ keyring integration — 99designs/keyring for OS-native secret storage (PR #74, merged 2026-04-14)
+- [x] config/ auto-detect local endpoints — Ollama, LM Studio, TEI, vLLM, llama.cpp (PR #76, merged 2026-04-14)
+- [x] config/ model pull helpers — Ollama + HuggingFace CLI detection + pull (PR #73, merged 2026-04-14)
+- [x] Migrate search.go, serve.go, embed.go, enrich.go to use config (PR #78, merged 2026-04-14)
+- [x] `markedup setup` CLI command — text-based interactive config (PR #77, merged 2026-04-14)
+- [x] TUI setup wizard — 6-step BubbleTea interactive config (PR #79, merged 2026-04-14)
+- [x] First-run detection + TUI wizard hook + docs (PR #80, merged 2026-04-14)
+
 ## Current Status
 - **Last updated**: 2026-04-14
-- **Current iteration goal**: Wave 2 complete (KHA-278 + KHA-283 resolved), Wave 3 next
+- **Current iteration goal**: Wave 3 complete (KHA-279 resolved), IRL testing next
 - **Known tech debt**: `show` command 1-arg ambiguity (path vs id heuristic); go.mod at go 1.25 (plan said 1.22+); VectorCacheLookup interface in index/search.go to avoid import cycle
 - **CRITICAL GAP**: Files without frontmatter are silently skipped by index.Load() — the entire pipeline requires manual frontmatter authoring, making markedup unusable for existing markdown corpora
-- **MCP server**: Now uses `mark3labs/mcp-go` v0.47.1 SDK. **7 tools**: `markedup_search`, `markedup_get_page`, `markedup_traverse`, `markedup_get_structure`, `embed_status`, `embed_file`, `markedup_reason`. Integration tests in serve_test.go (9 new reason tests).
-- **New packages**: `llm/` (shared OpenAI-compatible chat completion client), `index/graph_summary.go` (CompactGraphSummary with Summary + WithPageIDs), `internal/cli/rerank_format.go`
-- **Schema additions**: `Summary string` field in `GraphFrontmatter` and `SummaryNode`; `GenerateSummary()` in enrich Tier 2
-- **Local model E2E**: `e2e_localmodel_test.go` (`//go:build localmodel`), `scripts/smoke-test.sh`, `docs/local-testing.md`. **6 E2E tests** (embed, summary, extract-llm, extract-triplex, rerank, reason). Env vars: `MARKEDUP_LLM_ENDPOINT/MODEL`, `MARKEDUP_TRIPLEX_ENDPOINT/MODEL`, `MARKEDUP_EMBED_*`, `MARKEDUP_RERANK_*`, `MARKEDUP_RERANK_FORMAT`
+- **MCP server**: 7 tools: `markedup_search`, `markedup_get_page`, `markedup_traverse`, `markedup_get_structure`, `embed_status`, `embed_file`, `markedup_reason`
+- **Config system**: `config/` package with cascade (`~/.markedup.yaml` → `.markedup.yaml` → env vars → CLI flags), OS keychain secrets via `99designs/keyring`, auto-detect local endpoints, model pull helpers
+- **Setup experience**: TUI wizard (first-run auto-launch) + `markedup setup` CLI command. Auto-detects Ollama/LM Studio/TEI/vLLM/llama.cpp. Supports OpenRouter, OpenAI, Ollama Cloud, custom endpoints.
+- **New packages**: `config/` (config, keyring, detect, pull), `llm/`, `internal/tui/setup/`, `internal/cli/rerank_format.go`
+- **Local model E2E**: 6 tests (embed, summary, extract-llm, extract-triplex, rerank, reason)
+- **Direct Dependencies**: 10 total (added `github.com/99designs/keyring`)
 - **Open PRs**: none
-- **PageIndex investigation**: COMPLETE — Full research in `docs/design-pageindex-research.md`.
 - **Queued — Next up** (Linear project: MarkedUp — Knowledge Graph CLI):
-  - KHA-279: Config file (.markedup.yaml) (Wave 3)
   - KHA-280: OpenRouter OAuth browser auth (Future)
   - KHA-282: Remote model E2E testing — OpenRouter + HF Inference Endpoints (Wave 1.5, owner: human)
