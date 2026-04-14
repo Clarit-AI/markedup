@@ -4,6 +4,7 @@ package cli
 import (
 	"os"
 
+	"github.com/KHAEntertainment/markedup/config"
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
@@ -13,6 +14,7 @@ var (
 	depthFlag  int
 	isTTY      bool
 	noEnrich   bool
+	appConfig  = &config.Config{} // safe zero-value default; overwritten by PersistentPreRun
 )
 
 func newRootCmd() *cobra.Command {
@@ -22,6 +24,7 @@ func newRootCmd() *cobra.Command {
 		Long:  "markedup builds an in-memory knowledge graph from Obsidian-compatible markdown files with YAML frontmatter.",
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			isTTY = isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+			appConfig, _ = config.Load(".")
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,

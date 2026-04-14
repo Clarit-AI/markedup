@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 
 	"github.com/KHAEntertainment/markedup/cache"
 	"github.com/KHAEntertainment/markedup/embed"
@@ -59,17 +58,13 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	searchOpts = append(searchOpts, index.WithContext(ctx))
 
 	if searchSemantic {
-		embedEndpoint := os.Getenv("MARKEDUP_EMBED_ENDPOINT")
-		embedModel := os.Getenv("MARKEDUP_EMBED_MODEL")
-		embedAPIKey := os.Getenv("MARKEDUP_EMBED_API_KEY")
-
-		if embedEndpoint == "" || embedModel == "" {
-			log.Println("search: --semantic requires MARKEDUP_EMBED_ENDPOINT and MARKEDUP_EMBED_MODEL env vars")
+		if appConfig.Embed.Endpoint == "" || appConfig.Embed.Model == "" {
+			log.Println("search: --semantic requires embed endpoint and model (set via config or MARKEDUP_EMBED_* env vars)")
 		} else {
 			emb := embed.NewOpenAICompatible(embed.Config{
-				Endpoint:  embedEndpoint,
-				ModelName: embedModel,
-				APIKey:    embedAPIKey,
+				Endpoint:  appConfig.Embed.Endpoint,
+				ModelName: appConfig.Embed.Model,
+				APIKey:    appConfig.Embed.APIKey,
 			})
 			vc := cache.NewVectorCache(path)
 			searchOpts = append(searchOpts,
@@ -80,17 +75,13 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	if searchRerank {
-		rerankEndpoint := os.Getenv("MARKEDUP_RERANK_ENDPOINT")
-		rerankModel := os.Getenv("MARKEDUP_RERANK_MODEL")
-		rerankAPIKey := os.Getenv("MARKEDUP_RERANK_API_KEY")
-
-		if rerankEndpoint == "" || rerankModel == "" {
-			log.Println("search: --rerank requires MARKEDUP_RERANK_ENDPOINT and MARKEDUP_RERANK_MODEL env vars")
+		if appConfig.Rerank.Endpoint == "" || appConfig.Rerank.Model == "" {
+			log.Println("search: --rerank requires rerank endpoint and model (set via config or MARKEDUP_RERANK_* env vars)")
 		} else {
 			rr := rerank.NewCrossEncoder(rerank.Config{
-				Endpoint: rerankEndpoint,
-				Model:    rerankModel,
-				APIKey:   rerankAPIKey,
+				Endpoint: appConfig.Rerank.Endpoint,
+				Model:    appConfig.Rerank.Model,
+				APIKey:   appConfig.Rerank.APIKey,
 				Format:   parseRerankFormat(searchRerankFmt),
 			})
 			searchOpts = append(searchOpts, index.WithReranker(rr))
