@@ -90,19 +90,22 @@
 - [x] Page summaries in enrich Tier 2 pipeline (PR #47, merged 2026-04-14)
 - [x] MCP server integration tests — serve_test.go (PR #45, merged 2026-04-14)
 
+### Wave 1.5 — Local Model Test Infrastructure
+- [x] E2E tests + smoke script + docs for local model endpoints (PR #49, merged 2026-04-13, KHA-281)
+
 ## Current Status
-- **Last updated**: 2026-04-14
-- **Current iteration goal**: Wave 1 complete, Wave 2 (markedup_reason) next
+- **Last updated**: 2026-04-13
+- **Current iteration goal**: Wave 1.5 complete, Wave 2 (markedup_reason) next
 - **Known tech debt**: `show` command 1-arg ambiguity (path vs id heuristic); go.mod at go 1.25 (plan said 1.22+); VectorCacheLookup interface in index/search.go to avoid import cycle; `SummaryNode` in graph_summary.go missing `Summary` field (needs connecting KHA-275 + KHA-276 output)
 - **CRITICAL GAP**: Files without frontmatter are silently skipped by index.Load() — the entire pipeline requires manual frontmatter authoring, making markedup unusable for existing markdown corpora
 - **MCP server**: Now uses `mark3labs/mcp-go` v0.47.1 SDK. 6 tools: `markedup_search`, `markedup_get_page`, `markedup_traverse`, `markedup_get_structure`, `embed_status`, `embed_file`. Integration tests in serve_test.go.
 - **New packages/files**: `index/graph_summary.go` (CompactGraphSummary), `internal/cli/export.go` (export --compact command)
 - **Schema additions**: `Summary string` field in `GraphFrontmatter`; `GenerateSummary()` in enrich Tier 2
+- **Local model E2E**: `e2e_localmodel_test.go` (`//go:build localmodel`), `scripts/smoke-test.sh`, `docs/local-testing.md`. New env vars: `MARKEDUP_LLM_ENDPOINT/MODEL`, `MARKEDUP_TRIPLEX_ENDPOINT/MODEL` (in addition to existing `MARKEDUP_EMBED_*` and `MARKEDUP_RERANK_*`)
 - **Open PRs**: none
 - **PageIndex investigation**: COMPLETE — Full research in `docs/design-pageindex-research.md`.
 - **Queued — Next up** (Linear project: MarkedUp — Knowledge Graph CLI):
   - KHA-278: `markedup_reason` — LLM graph reasoning retrieval tool (Wave 2, depends on KHA-275 + model endpoints)
   - KHA-279: Config file (.markedup.yaml) (Wave 3)
   - KHA-280: OpenRouter OAuth browser auth (Future)
-  - KHA-281: Local model test environment — llama.cpp/Symphony (Wave 1.5, owner: human)
   - KHA-282: Remote model E2E testing — OpenRouter + HF Inference Endpoints (Wave 1.5, owner: human)
