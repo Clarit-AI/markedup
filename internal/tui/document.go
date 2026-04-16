@@ -151,7 +151,7 @@ func (m docModel) View() string {
 	b.WriteString("\n")
 
 	// Help.
-	b.WriteString(helpStyle.Render("esc/backspace: back  |  tab: explore  |  j/k/arrows: scroll  |  q/ctrl+c: quit"))
+	b.WriteString(helpStyle.Render("esc/backspace: back  |  tab: explore  |  h: home  |  j/k/arrows: scroll  |  q/ctrl+c: quit"))
 
 	return b.String()
 }
