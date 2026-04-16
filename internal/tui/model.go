@@ -10,6 +10,7 @@ import (
 
 	"github.com/KHAEntertainment/markedup/config"
 	"github.com/KHAEntertainment/markedup/index"
+	"github.com/KHAEntertainment/markedup/internal/tui/setup"
 	"github.com/KHAEntertainment/markedup/schema"
 )
 
@@ -22,6 +23,7 @@ const (
 	viewDocument
 	viewExplore
 	viewOnboarding
+	viewSetup
 )
 
 // homeMenuSearch is the menu index for Search.
@@ -50,6 +52,7 @@ type Model struct {
 	doc         docModel
 	explore     exploreModel
 	onboarding  onboardingModel
+	wizard      setup.WizardModel
 	status      statusModel
 	taskRunning bool
 	width       int
@@ -110,6 +113,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.doc.height = msg.Height
 			m.doc.initViewport()
 		}
+
+		// Propagate resize to the wizard if active.
+		if m.current == viewSetup {
+			m.wizard.SetSize(msg.Width, msg.Height)
+		}
 		return m, nil
 
 	case statusTickMsg:
@@ -167,18 +175,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, dismissTick()
 
-	case setupDoneMsg:
-		// Reload config after setup completes.
-		if msg.err == nil {
-			if newCfg, loadErr := config.Load(m.kbDir); loadErr == nil {
-				m.cfg = newCfg
-			}
-		}
-		// Return to home regardless of error.
-		m.current = viewHome
-		return m, nil
-
 	case tea.KeyMsg:
+		// When the setup wizard is active, only intercept ctrl+c at the
+		// top level (the embedded wizard handles its own ctrl+c/esc).
+		if m.current == viewSetup {
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			// All other keys go to the wizard.
+			break
+		}
+
 		// Global quit keys.
 		switch msg.String() {
 		case "ctrl+c":
@@ -223,6 +230,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateDocument(msg)
 	case viewExplore:
 		return m.updateExplore(msg)
+	case viewSetup:
+		return m.updateSetup(msg)
 	}
 
 	return m, nil
@@ -273,16 +282,51 @@ func (m Model) updateHome(msg tea.Msg) (tea.Model, tea.Cmd) {
 					spinnerTick(),
 				)
 			case homeMenuSettings:
-				c := exec.Command("markedup", "setup")
-				return m, tea.ExecProcess(c, func(err error) tea.Msg {
-					return setupDoneMsg{err: err}
-				})
+				m.wizard = setup.NewWizardModel()
+				m.wizard.SetEmbedded(true)
+				m.wizard.SetSize(m.width, m.height)
+				m.current = viewSetup
+				return m, m.wizard.Init()
 			}
 		}
 	}
 
 	var cmd tea.Cmd
 	m.home, cmd = m.home.Update(msg)
+	return m, cmd
+}
+
+func (m Model) updateSetup(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	result, cmd := m.wizard.Update(msg)
+	m.wizard = result.(setup.WizardModel)
+
+	if m.wizard.Saved() {
+		// Reload config from disk (the wizard already saved it).
+		if newCfg, err := config.Load(m.kbDir); err == nil {
+			m.cfg = newCfg
+		}
+
+		// Reload index so any changes are visible.
+		if m.kbDir != "" {
+			result, err := index.Load(context.Background(), m.kbDir, index.WithIgnoreErrors(true))
+			if err == nil {
+				m.idx = result.Index
+				m.search = newSearchModel(m.idx)
+				m.search.width = m.width
+				m.search.height = m.height
+			}
+		}
+
+		m.current = viewHome
+		return m, nil
+	}
+
+	if m.wizard.Cancelled() {
+		m.current = viewHome
+		return m, nil
+	}
+
 	return m, cmd
 }
 
@@ -393,6 +437,8 @@ func (m Model) View() string {
 		content = m.doc.View()
 	case viewExplore:
 		content = m.explore.View()
+	case viewSetup:
+		content = m.wizard.View()
 	}
 
 	// Append status bar if there is something to show.
@@ -401,11 +447,6 @@ func (m Model) View() string {
 		return content + "\n" + statusLine
 	}
 	return content
-}
-
-// setupDoneMsg is sent when the `markedup setup` subprocess finishes.
-type setupDoneMsg struct {
-	err error
 }
 
 // lastMeaningfulLine returns the last non-empty line from output.
