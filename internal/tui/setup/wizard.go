@@ -18,7 +18,7 @@ func Run() (*config.Config, error) {
 		return nil, fmt.Errorf("setup wizard requires a terminal (stdout is not a TTY)")
 	}
 
-	m := newWizardModel()
+	m := NewWizardModel()
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
 	result, err := p.Run()
@@ -26,7 +26,7 @@ func Run() (*config.Config, error) {
 		return nil, fmt.Errorf("setup wizard error: %w", err)
 	}
 
-	wm, ok := result.(wizardModel)
+	wm, ok := result.(WizardModel)
 	if !ok {
 		return nil, nil
 	}
@@ -38,8 +38,8 @@ func Run() (*config.Config, error) {
 	return wm.config, nil
 }
 
-// wizardModel is the root BubbleTea model for the 7-step setup wizard.
-type wizardModel struct {
+// WizardModel is the root BubbleTea model for the 7-step setup wizard.
+type WizardModel struct {
 	step         int   // 0=welcome, 1=embed, 2=llm, 3=rerank, 4=triplex, 5=keys, 6=confirm
 	stepHistory  []int // stack of previous step indices for Esc back-navigation
 	config       *config.Config
@@ -74,23 +74,54 @@ type wizardModel struct {
 	llmEndpoint     string
 	rerankEndpoint  string
 	triplexEndpoint string
+
+	// embedded is true when the wizard is running inside the main TUI
+	// rather than as a standalone program. When true, Esc at step 0
+	// sets cancelled but does not send tea.Quit.
+	embedded bool
 }
 
-func newWizardModel() wizardModel {
-	return wizardModel{
+// NewWizardModel creates a new setup wizard model.
+func NewWizardModel() WizardModel {
+	return WizardModel{
 		step:    0,
 		config:  &config.Config{},
 		welcome: newWelcomeStep(),
 	}
 }
 
+// Saved returns true if the wizard completed and saved the configuration.
+func (m WizardModel) Saved() bool { return m.confirm.saved }
+
+// Cancelled returns true if the user cancelled the wizard.
+func (m WizardModel) Cancelled() bool { return m.cancelled }
+
+// Config returns the configuration built by the wizard.
+func (m WizardModel) Config() *config.Config { return m.config }
+
+// Format returns the reranker format value selected during wizard setup.
+func (m WizardModel) Format() string { return m.rerank.formatVal }
+
+// CollectedKeys returns the API keys collected during wizard setup.
+func (m WizardModel) CollectedKeys() map[string]string { return m.keys.collectedKeys }
+
+// SetEmbedded marks the wizard as running embedded inside a parent TUI.
+// When embedded, Esc at step 0 sets cancelled without sending tea.Quit.
+func (m *WizardModel) SetEmbedded(v bool) { m.embedded = v }
+
+// SetSize sets the width and height for the wizard model.
+func (m *WizardModel) SetSize(w, h int) {
+	m.width = w
+	m.height = h
+}
+
 // Init implements tea.Model.
-func (m wizardModel) Init() tea.Cmd {
+func (m WizardModel) Init() tea.Cmd {
 	return m.welcome.Init()
 }
 
 // Update implements tea.Model.
-func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -101,6 +132,9 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Global quit at any step.
 		if msg.String() == "ctrl+c" {
 			m.cancelled = true
+			if m.embedded {
+				return m, nil
+			}
 			return m, tea.Quit
 		}
 
@@ -131,7 +165,7 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m wizardModel) handleEsc() (tea.Model, tea.Cmd) {
+func (m WizardModel) handleEsc() (tea.Model, tea.Cmd) {
 	// If the current step sub-model has an active sub-phase, let it handle Esc
 	// internally (e.g. going from model-entry back to provider list).
 	switch m.step {
@@ -153,6 +187,9 @@ func (m wizardModel) handleEsc() (tea.Model, tea.Cmd) {
 	// Step 0 (welcome): Esc exits cleanly.
 	if m.step == 0 {
 		m.cancelled = true
+		if m.embedded {
+			return m, nil
+		}
 		return m, tea.Quit
 	}
 
@@ -171,7 +208,7 @@ func (m wizardModel) handleEsc() (tea.Model, tea.Cmd) {
 // Step update helpers
 // ---------------------------------------------------------------------------
 
-func (m wizardModel) updateWelcome(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m WizardModel) updateWelcome(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle Enter to advance when detection is done.
 	if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "enter" && !m.welcome.detecting {
 		m.detected = m.welcome.detected
@@ -190,7 +227,7 @@ func (m wizardModel) updateWelcome(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m wizardModel) updateEmbed(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m WizardModel) updateEmbed(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.embed, cmd = m.embed.Update(msg)
 
@@ -212,7 +249,7 @@ func (m wizardModel) updateEmbed(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m wizardModel) updateLLM(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m WizardModel) updateLLM(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.llm, cmd = m.llm.Update(msg)
 
@@ -234,7 +271,7 @@ func (m wizardModel) updateLLM(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m wizardModel) updateRerank(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m WizardModel) updateRerank(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.rerank, cmd = m.rerank.Update(msg)
 
@@ -257,7 +294,7 @@ func (m wizardModel) updateRerank(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m wizardModel) updateTriplex(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m WizardModel) updateTriplex(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.triplex, cmd = m.triplex.Update(msg)
 
@@ -296,7 +333,7 @@ func (m wizardModel) updateTriplex(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m wizardModel) updateKeys(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m WizardModel) updateKeys(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.keys, cmd = m.keys.Update(msg)
 
@@ -310,7 +347,7 @@ func (m wizardModel) updateKeys(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m wizardModel) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m WizardModel) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		switch keyMsg.String() {
 		case "enter":
@@ -349,7 +386,10 @@ func (m wizardModel) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.confirm.saved = true
 				return m, nil
 			}
-			// Already saved — quit.
+			// Already saved — quit (or signal parent if embedded).
+			if m.embedded {
+				return m, nil
+			}
 			return m, tea.Quit
 		}
 	}
@@ -358,7 +398,7 @@ func (m wizardModel) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View implements tea.Model.
-func (m wizardModel) View() string {
+func (m WizardModel) View() string {
 	width := m.width
 	if width == 0 {
 		width = 80

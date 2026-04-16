@@ -481,10 +481,66 @@ func TestStatusModel_ShouldDismiss(t *testing.T) {
 	assert.True(t, s.shouldDismiss())
 }
 
-func TestModel_Settings_LaunchesSetup(t *testing.T) {
-	// Verify that Settings is menu index 4 and has the right label.
-	assert.Equal(t, 4, homeMenuSettings)
-	assert.Equal(t, "Settings", homeMenuItems[homeMenuSettings].label)
+func TestModel_Settings_OpensWizard(t *testing.T) {
+	idx := buildTestIndex(t,
+		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
+	)
+	m := NewModel(idx, ".", nil)
+	assert.Equal(t, viewHome, m.current)
+
+	// Navigate to Settings (index 4).
+	m.home.cursor = homeMenuSettings
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+
+	// Should be in setup view.
+	assert.Equal(t, viewSetup, m.current)
+
+	// Wizard view should render without panicking.
+	v := m.View()
+	assert.Contains(t, v, "Welcome to markedup setup!")
+}
+
+func TestModel_Settings_WizardCancel_ReturnsHome(t *testing.T) {
+	idx := buildTestIndex(t,
+		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
+	)
+	m := NewModel(idx, ".", nil)
+
+	// Open settings.
+	m.home.cursor = homeMenuSettings
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	assert.Equal(t, viewSetup, m.current)
+
+	// Press Esc at step 0 — should cancel and return to home.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	assert.Equal(t, viewHome, m.current, "Esc at step 0 should return to home")
+}
+
+func TestModel_Settings_GlobalQDoesNotQuitInWizard(t *testing.T) {
+	idx := buildTestIndex(t,
+		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
+	)
+	m := NewModel(idx, ".", nil)
+
+	// Open settings.
+	m.home.cursor = homeMenuSettings
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	assert.Equal(t, viewSetup, m.current)
+
+	// Press 'q' — should NOT quit, the wizard should still be active.
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m = updated.(Model)
+	assert.Equal(t, viewSetup, m.current, "q should not quit while in setup wizard")
+	// The cmd should not be a quit command.
+	if cmd != nil {
+		msg := cmd()
+		_, isQuit := msg.(tea.QuitMsg)
+		assert.False(t, isQuit, "q should not produce a quit command in setup view")
+	}
 }
 
 func TestLastMeaningfulLine(t *testing.T) {

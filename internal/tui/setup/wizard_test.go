@@ -11,7 +11,7 @@ import (
 )
 
 func TestNewWizardModel_InitialState(t *testing.T) {
-	m := newWizardModel()
+	m := NewWizardModel()
 	assert.Equal(t, 0, m.step)
 	assert.NotNil(t, m.config)
 	assert.False(t, m.cancelled)
@@ -19,13 +19,13 @@ func TestNewWizardModel_InitialState(t *testing.T) {
 }
 
 func TestWizardModel_CtrlC_Cancels(t *testing.T) {
-	m := newWizardModel()
+	m := NewWizardModel()
 
 	// Ctrl+C at any step should cancel.
 	for step := 0; step < 7; step++ {
 		m.step = step
 		result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
-		wm := result.(wizardModel)
+		wm := result.(WizardModel)
 		assert.True(t, wm.cancelled, "step %d should cancel on Ctrl+C", step)
 		require.NotNil(t, cmd)
 		msg := cmd()
@@ -35,64 +35,64 @@ func TestWizardModel_CtrlC_Cancels(t *testing.T) {
 }
 
 func TestWizardModel_WindowResize(t *testing.T) {
-	m := newWizardModel()
+	m := NewWizardModel()
 
 	result, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	wm := result.(wizardModel)
+	wm := result.(WizardModel)
 	assert.Equal(t, 120, wm.width)
 	assert.Equal(t, 40, wm.height)
 }
 
 func TestWizardModel_WelcomeStep_DetectDone(t *testing.T) {
-	m := newWizardModel()
+	m := NewWizardModel()
 
 	// Simulate detection completing.
 	endpoints := []config.Endpoint{
 		{Name: "Ollama", URL: "http://localhost:11434", Type: "multi", Healthy: true, Models: []string{"llama3"}},
 	}
 	result, _ := m.Update(detectDoneMsg{endpoints: endpoints})
-	wm := result.(wizardModel)
+	wm := result.(WizardModel)
 	assert.False(t, wm.welcome.detecting)
 	assert.Len(t, wm.welcome.detected, 1)
 }
 
 func TestWizardModel_WelcomeStep_EnterAdvances(t *testing.T) {
-	m := newWizardModel()
+	m := NewWizardModel()
 
 	// Simulate detection completing.
 	result, _ := m.Update(detectDoneMsg{endpoints: nil})
-	m = result.(wizardModel)
+	m = result.(WizardModel)
 
 	// Press Enter to advance.
 	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	wm := result.(wizardModel)
+	wm := result.(WizardModel)
 	assert.Equal(t, 1, wm.step)
 }
 
 func TestWizardModel_WelcomeStep_EnterDuringDetectDoesNotAdvance(t *testing.T) {
-	m := newWizardModel()
+	m := NewWizardModel()
 	// Still detecting, press Enter.
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	wm := result.(wizardModel)
+	wm := result.(WizardModel)
 	assert.Equal(t, 0, wm.step, "should not advance while detecting")
 }
 
 func TestWizardModel_EscAtStep0_Cancels(t *testing.T) {
-	m := newWizardModel()
+	m := NewWizardModel()
 	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	wm := result.(wizardModel)
+	wm := result.(WizardModel)
 	assert.True(t, wm.cancelled)
 	require.NotNil(t, cmd)
 }
 
 func TestWizardModel_EscAtStep1_GoesBack(t *testing.T) {
-	m := newWizardModel()
+	m := NewWizardModel()
 	// Fast-forward to step 1.
 	m.step = 1
 	m.embed = newProviderStep("Embed", "", nil, "embed", false, false)
 
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	wm := result.(wizardModel)
+	wm := result.(WizardModel)
 	assert.Equal(t, 0, wm.step)
 }
 
@@ -242,50 +242,50 @@ func TestWelcomeStep_View(t *testing.T) {
 }
 
 func TestWizardModel_FullFlow_SkipAll(t *testing.T) {
-	m := newWizardModel()
+	m := NewWizardModel()
 
 	// Complete detection.
 	result, _ := m.Update(detectDoneMsg{endpoints: nil})
-	m = result.(wizardModel)
+	m = result.(WizardModel)
 
 	// Advance to embed step.
 	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = result.(wizardModel)
+	m = result.(WizardModel)
 	assert.Equal(t, 1, m.step)
 
 	// Skip embed.
 	// Navigate to "Skip" (last item).
 	for m.embed.cursor < len(m.embed.choices)-1 {
 		result, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-		m = result.(wizardModel)
+		m = result.(WizardModel)
 	}
 	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = result.(wizardModel)
+	m = result.(WizardModel)
 	assert.Equal(t, 2, m.step) // LLM step
 
 	// Skip LLM.
 	for m.llm.cursor < len(m.llm.choices)-1 {
 		result, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-		m = result.(wizardModel)
+		m = result.(WizardModel)
 	}
 	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = result.(wizardModel)
+	m = result.(WizardModel)
 	assert.Equal(t, 3, m.step) // Rerank step
 
 	// Skip Rerank (pre-selected on Skip for optional).
 	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = result.(wizardModel)
+	m = result.(WizardModel)
 	assert.Equal(t, 4, m.step) // Triplex step
 
 	// Skip Triplex by pressing S.
 	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
-	m = result.(wizardModel)
+	m = result.(WizardModel)
 	// Should jump to confirm since no keys needed.
 	assert.Equal(t, 6, m.step)
 }
 
 func TestWizardModel_View_AllSteps(t *testing.T) {
-	m := newWizardModel()
+	m := NewWizardModel()
 	m.width = 80
 	m.height = 40
 
@@ -396,44 +396,44 @@ func TestTriplexStep_View(t *testing.T) {
 }
 
 func TestWizardModel_TriplexStep(t *testing.T) {
-	m := newWizardModel()
+	m := NewWizardModel()
 
 	// Complete detection.
 	result, _ := m.Update(detectDoneMsg{endpoints: nil})
-	m = result.(wizardModel)
+	m = result.(WizardModel)
 
 	// Advance to embed step.
 	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = result.(wizardModel)
+	m = result.(WizardModel)
 	assert.Equal(t, 1, m.step)
 
 	// Skip embed (navigate to last item and press Enter).
 	for m.embed.cursor < len(m.embed.choices)-1 {
 		result, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-		m = result.(wizardModel)
+		m = result.(WizardModel)
 	}
 	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = result.(wizardModel)
+	m = result.(WizardModel)
 	assert.Equal(t, 2, m.step)
 
 	// Skip LLM.
 	for m.llm.cursor < len(m.llm.choices)-1 {
 		result, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-		m = result.(wizardModel)
+		m = result.(WizardModel)
 	}
 	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = result.(wizardModel)
+	m = result.(WizardModel)
 	assert.Equal(t, 3, m.step)
 
 	// Skip Rerank (pre-selected on Skip).
 	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = result.(wizardModel)
+	m = result.(WizardModel)
 	assert.Equal(t, 4, m.step, "should advance to triplex step")
 
 	// Configure Triplex with localhost endpoint.
 	m.triplex.endpointIn.SetValue("http://localhost:11434")
 	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = result.(wizardModel)
+	m = result.(WizardModel)
 
 	// No cloud keys needed — should jump straight to confirm (step 6).
 	assert.Equal(t, 6, m.step, "no cloud keys → jump to confirm")
@@ -442,14 +442,14 @@ func TestWizardModel_TriplexStep(t *testing.T) {
 }
 
 func TestWizardModel_EscFromTriplex_GoesBackToRerank(t *testing.T) {
-	m := newWizardModel()
+	m := NewWizardModel()
 	m.step = 4
 	m.triplex = newTriplexStep(nil)
 	// Push rerank (step 3) onto the history stack as the wizard would.
 	m.stepHistory = []int{0, 1, 2, 3}
 
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	wm := result.(wizardModel)
+	wm := result.(WizardModel)
 	assert.Equal(t, 3, wm.step, "Esc from triplex should go back to rerank")
 }
 
