@@ -457,22 +457,24 @@ func (p providerStep) View(width int) string {
 const triplexModelName = "Phi-3-mini-128k-instruct/triplex"
 
 // triplexDescription explains what Triplex does and why it is optional.
-const triplexDescription = "Triplex extracts entities and relationships from your notes to build a\nrich knowledge graph. It is optional but highly recommended — without it,\nmarkedup uses your general LLM for extraction (lower quality).\n\nTriplex is a Phi-3-mini-128k-instruct fine-tune and runs locally via Ollama\nor a compatible OpenAI-compatible endpoint. You do not choose the model name\n— it is fixed."
+const triplexDescription = "Triplex extracts entities and relationships from your notes to build a\nrich knowledge graph. It is optional but highly recommended — without it,\nmarkedup uses your general LLM for extraction (lower quality).\n\nTriplex is a Phi-3-mini-128k-instruct fine-tune and runs locally via Ollama\nor a compatible OpenAI-compatible endpoint. The default model name is\npre-filled but can be edited if your host uses a different identifier."
 
 // triplexStep is the wizard sub-model for configuring the Triplex extraction model.
-// Unlike providerStep, there is no model picker — the model name is fixed.
+// The model name defaults to triplexModelName but can be edited by the user.
 type triplexStep struct {
 	endpointIn textinput.Model
+	modelIn    textinput.Model
 	skip       bool
 	done       bool
 	needsKey   bool
 	selected   config.ServiceConfig
-	// skipCursor: 0 = endpoint input focused, 1 = Skip option highlighted
+	// skipCursor: 0 = endpoint input focused, 1 = model input focused, 2 = Skip option highlighted
 	skipCursor int
 }
 
 // newTriplexStep creates the Triplex configuration step.
 // If Ollama was among the detected endpoints, the endpoint is pre-filled.
+// The model name defaults to triplexModelName but is editable.
 func newTriplexStep(detected []config.Endpoint) triplexStep {
 	ei := textinput.New()
 	ei.Placeholder = "http://localhost:11434"
@@ -489,8 +491,16 @@ func newTriplexStep(detected []config.Endpoint) triplexStep {
 
 	ei.Focus()
 
+	// Model input pre-filled with default Triplex model name.
+	mi := textinput.New()
+	mi.Placeholder = triplexModelName
+	mi.CharLimit = 128
+	mi.Width = 50
+	mi.SetValue(triplexModelName)
+
 	return triplexStep{
 		endpointIn: ei,
+		modelIn:    mi,
 	}
 }
 
@@ -499,42 +509,71 @@ func (t triplexStep) Update(msg tea.Msg) (triplexStep, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "s", "S":
-			// S key skips directly.
-			t.skip = true
-			t.done = true
-			return t, nil
-		case "tab", "down":
-			// Move focus between endpoint input and skip option.
+			// S key skips directly (only when not typing in an input).
+			if t.skipCursor == 2 {
+				t.skip = true
+				t.done = true
+				return t, nil
+			}
+			// When focused on endpoint or model input, let the character through.
 			if t.skipCursor == 0 {
+				var cmd tea.Cmd
+				t.endpointIn, cmd = t.endpointIn.Update(msg)
+				return t, cmd
+			}
+			if t.skipCursor == 1 {
+				var cmd tea.Cmd
+				t.modelIn, cmd = t.modelIn.Update(msg)
+				return t, cmd
+			}
+		case "tab", "down":
+			// Cycle: endpoint(0) → model(1) → skip(2) → endpoint(0).
+			switch t.skipCursor {
+			case 0:
 				t.endpointIn.Blur()
 				t.skipCursor = 1
-			} else {
+				t.modelIn.Focus()
+				return t, textinput.Blink
+			case 1:
+				t.modelIn.Blur()
+				t.skipCursor = 2
+			case 2:
 				t.skipCursor = 0
 				t.endpointIn.Focus()
 				return t, textinput.Blink
 			}
 		case "up":
-			if t.skipCursor == 1 {
+			switch t.skipCursor {
+			case 2:
+				t.skipCursor = 1
+				t.modelIn.Focus()
+				return t, textinput.Blink
+			case 1:
+				t.modelIn.Blur()
 				t.skipCursor = 0
 				t.endpointIn.Focus()
 				return t, textinput.Blink
 			}
 		case "enter":
-			if t.skipCursor == 1 {
+			if t.skipCursor == 2 {
 				// Skip selected.
 				t.skip = true
 				t.done = true
 				return t, nil
 			}
-			// Confirm endpoint.
-			val := strings.TrimSpace(t.endpointIn.Value())
-			if val == "" {
+			// Confirm endpoint + model.
+			epVal := strings.TrimSpace(t.endpointIn.Value())
+			if epVal == "" {
 				return t, nil
 			}
-			t.selected.Endpoint = val
-			t.selected.Model = triplexModelName
+			modelVal := strings.TrimSpace(t.modelIn.Value())
+			if modelVal == "" {
+				modelVal = triplexModelName
+			}
+			t.selected.Endpoint = epVal
+			t.selected.Model = modelVal
 			// Cloud endpoint needs an API key; localhost does not.
-			t.needsKey = !strings.Contains(val, "localhost") && !strings.Contains(val, "127.0.0.1")
+			t.needsKey = !strings.Contains(epVal, "localhost") && !strings.Contains(epVal, "127.0.0.1")
 			t.done = true
 			return t, nil
 		case "esc":
@@ -546,11 +585,21 @@ func (t triplexStep) Update(msg tea.Msg) (triplexStep, tea.Cmd) {
 				t.endpointIn, cmd = t.endpointIn.Update(msg)
 				return t, cmd
 			}
+			if t.skipCursor == 1 {
+				var cmd tea.Cmd
+				t.modelIn, cmd = t.modelIn.Update(msg)
+				return t, cmd
+			}
 		}
 	default:
 		if t.skipCursor == 0 {
 			var cmd tea.Cmd
 			t.endpointIn, cmd = t.endpointIn.Update(msg)
+			return t, cmd
+		}
+		if t.skipCursor == 1 {
+			var cmd tea.Cmd
+			t.modelIn, cmd = t.modelIn.Update(msg)
 			return t, cmd
 		}
 	}
@@ -565,27 +614,28 @@ func (t triplexStep) View(width int) string {
 	b.WriteString(triplexDescription)
 	b.WriteString("\n\n")
 
-	// Fixed model display.
-	b.WriteString(labelStyle.Render("Model: "))
-	b.WriteString(mutedStyle.Render("Phi-3-mini-128k-instruct (Triplex fine-tune)"))
-	b.WriteString("\n\n")
-
 	// Endpoint input.
 	b.WriteString(labelStyle.Render("Endpoint URL:"))
 	b.WriteString("\n")
 	b.WriteString(t.endpointIn.View())
 	b.WriteString("\n\n")
 
+	// Model input (editable, pre-filled with default).
+	b.WriteString(labelStyle.Render("Model:"))
+	b.WriteString("\n")
+	b.WriteString(t.modelIn.View())
+	b.WriteString("\n\n")
+
 	// Skip option.
 	skipLabel := "  Skip — use LLM for extraction instead (lower quality)"
-	if t.skipCursor == 1 {
+	if t.skipCursor == 2 {
 		b.WriteString(selectedStyle.Render("> " + strings.TrimSpace(skipLabel)))
 	} else {
 		b.WriteString(subtitleStyle.Render(skipLabel))
 	}
 	b.WriteString("\n\n")
 
-	b.WriteString(helpStyle.Render("Enter: confirm  |  S: skip  |  Tab/↑↓: navigate  |  Esc: back  |  Ctrl+C: cancel"))
+	b.WriteString(helpStyle.Render("Enter: confirm  |  Tab/↑↓: navigate  |  Esc: back  |  Ctrl+C: cancel"))
 	return b.String()
 }
 
@@ -595,10 +645,11 @@ func (t triplexStep) View(width int) string {
 
 // keyEntry represents one API key to collect.
 type keyEntry struct {
-	service   string   // "embed", "llm", "rerank"
-	label     string   // display label
-	endpoint  string   // provider endpoint, used for deduplication
-	services  []string // additional services sharing this key (for deduplication)
+	service    string   // "embed", "llm", "rerank"
+	label      string   // display label
+	endpoint   string   // provider endpoint, used for deduplication
+	services   []string // additional services sharing this key (for deduplication)
+	prefilled  bool     // true if an existing key was loaded from keyring
 }
 
 type keysStep struct {
@@ -608,6 +659,7 @@ type keysStep struct {
 	keyringOK      bool
 	done           bool
 	collectedKeys  map[string]string // service -> key value
+	hasExisting    bool              // true if any entry was pre-filled from keyring
 }
 
 // newKeysStep builds the API key collection step. For each service that needs
@@ -667,6 +719,24 @@ func newKeysStep(
 		}
 	}
 
+	// Check keyring for existing keys and pre-fill.
+	hasExisting := false
+	collectedKeys := make(map[string]string)
+	if config.KeyringAvailable() {
+		for i := range entries {
+			keyName := entries[i].service + "-api-key"
+			if existing, err := config.GetKey(keyName); err == nil && existing != "" {
+				entries[i].prefilled = true
+				hasExisting = true
+				// Pre-populate collectedKeys so Enter without changes keeps the key.
+				collectedKeys[entries[i].service] = existing
+				for _, svc := range entries[i].services {
+					collectedKeys[svc] = existing
+				}
+			}
+		}
+	}
+
 	inputs := make([]textinput.Model, len(entries))
 	for i := range entries {
 		ti := textinput.New()
@@ -674,6 +744,9 @@ func newKeysStep(
 		ti.CharLimit = 256
 		ti.Width = 50
 		ti.EchoMode = textinput.EchoPassword
+		if entries[i].prefilled {
+			ti.SetValue(collectedKeys[entries[i].service])
+		}
 		inputs[i] = ti
 	}
 	if len(inputs) > 0 {
@@ -684,7 +757,8 @@ func newKeysStep(
 		entries:       entries,
 		inputs:        inputs,
 		keyringOK:     config.KeyringAvailable(),
-		collectedKeys: make(map[string]string),
+		collectedKeys: collectedKeys,
+		hasExisting:   hasExisting,
 	}
 }
 
@@ -767,11 +841,28 @@ func (k keysStep) View(width int) string {
 	}
 	b.WriteString("\n\n")
 
+	// Show a note if any keys were pre-filled from the keyring.
+	hasPrefilled := false
+	for _, e := range k.entries {
+		if e.prefilled {
+			hasPrefilled = true
+			break
+		}
+	}
+	if hasPrefilled {
+		b.WriteString(mutedStyle.Render("Existing API keys found. Press Enter to keep."))
+		b.WriteString("\n\n")
+	}
+
 	for i, entry := range k.entries {
+		label := entry.label + ":"
+		if entry.prefilled {
+			label += " (saved)"
+		}
 		if i == k.cursor {
-			b.WriteString(selectedStyle.Render(entry.label + ":"))
+			b.WriteString(selectedStyle.Render(label))
 		} else {
-			b.WriteString(labelStyle.Render(entry.label + ":"))
+			b.WriteString(labelStyle.Render(label))
 		}
 		b.WriteString("\n")
 		b.WriteString(k.inputs[i].View())

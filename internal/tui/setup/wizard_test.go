@@ -277,8 +277,12 @@ func TestWizardModel_FullFlow_SkipAll(t *testing.T) {
 	m = result.(WizardModel)
 	assert.Equal(t, 4, m.step) // Triplex step
 
-	// Skip Triplex by pressing S.
-	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	// Skip Triplex: navigate to Skip option (tab twice), then Enter.
+	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab}) // endpoint→model
+	m = result.(WizardModel)
+	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab}) // model→skip
+	m = result.(WizardModel)
+	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = result.(WizardModel)
 	// Should jump to confirm since no keys needed.
 	assert.Equal(t, 6, m.step)
@@ -323,7 +327,11 @@ func TestWizardModel_View_AllSteps(t *testing.T) {
 func TestTriplexStep_Skip(t *testing.T) {
 	ts := newTriplexStep(nil)
 
-	// Press S to skip.
+	// Navigate to Skip option (skipCursor=2), then press S to skip.
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyTab}) // 0→1
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyTab}) // 1→2
+	assert.Equal(t, 2, ts.skipCursor, "should be on Skip option")
+
 	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	assert.True(t, ts.done, "skip should mark done")
 	assert.True(t, ts.skip, "skip should set skip=true")
@@ -378,20 +386,36 @@ func TestTriplexStep_CursorNavigation(t *testing.T) {
 	ts := newTriplexStep(nil)
 	assert.Equal(t, 0, ts.skipCursor, "should start with endpoint focused")
 
+	// Tab moves to model input.
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyTab})
+	assert.Equal(t, 1, ts.skipCursor, "tab from endpoint should go to model")
+
 	// Tab moves to skip option.
 	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyTab})
-	assert.Equal(t, 1, ts.skipCursor)
+	assert.Equal(t, 2, ts.skipCursor, "tab from model should go to skip")
 
-	// Up moves back to endpoint.
+	// Tab wraps back to endpoint.
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyTab})
+	assert.Equal(t, 0, ts.skipCursor, "tab from skip should wrap to endpoint")
+
+	// Up from model goes to endpoint.
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyTab}) // 0→1
 	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyUp})
-	assert.Equal(t, 0, ts.skipCursor)
+	assert.Equal(t, 0, ts.skipCursor, "up from model should go to endpoint")
+
+	// Up from skip goes to model.
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyTab}) // 0→1
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyTab}) // 1→2
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyUp})
+	assert.Equal(t, 1, ts.skipCursor, "up from skip should go to model")
 }
 
 func TestTriplexStep_View(t *testing.T) {
 	ts := newTriplexStep(nil)
 	view := ts.View(80)
 	assert.Contains(t, view, "Triple Extraction (Triplex)")
-	assert.Contains(t, view, "Phi-3-mini-128k-instruct (Triplex fine-tune)")
+	assert.Contains(t, view, "Model:")
+	assert.Contains(t, view, triplexModelName, "editable model input should show default")
 	assert.Contains(t, view, "Skip")
 }
 
@@ -451,6 +475,107 @@ func TestWizardModel_EscFromTriplex_GoesBackToRerank(t *testing.T) {
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	wm := result.(WizardModel)
 	assert.Equal(t, 3, wm.step, "Esc from triplex should go back to rerank")
+}
+
+// ---------------------------------------------------------------------------
+// Triplex editable model tests
+// ---------------------------------------------------------------------------
+
+func TestTriplexStep_CustomModel(t *testing.T) {
+	ts := newTriplexStep(nil)
+
+	// Model input should be pre-filled with the default.
+	assert.Equal(t, triplexModelName, ts.modelIn.Value(), "model should default to triplexModelName")
+
+	// Set a custom endpoint and custom model.
+	ts.endpointIn.SetValue("http://localhost:11434")
+	ts.modelIn.SetValue("my-custom-triplex-v2")
+
+	// Press Enter to confirm.
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.True(t, ts.done)
+	assert.False(t, ts.skip)
+	assert.Equal(t, "http://localhost:11434", ts.selected.Endpoint)
+	assert.Equal(t, "my-custom-triplex-v2", ts.selected.Model, "custom model name should be used")
+	assert.False(t, ts.needsKey)
+}
+
+func TestTriplexStep_DefaultModel_WhenEmpty(t *testing.T) {
+	ts := newTriplexStep(nil)
+
+	ts.endpointIn.SetValue("http://localhost:11434")
+	ts.modelIn.SetValue("") // empty model should fall back to default
+
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.True(t, ts.done)
+	assert.Equal(t, triplexModelName, ts.selected.Model, "empty model should fall back to default")
+}
+
+func TestTriplexStep_ModelPreFilled(t *testing.T) {
+	ts := newTriplexStep(nil)
+	assert.Equal(t, triplexModelName, ts.modelIn.Value(), "model input should be pre-filled with default")
+}
+
+func TestTriplexStep_SInEndpointInput_PassesThrough(t *testing.T) {
+	ts := newTriplexStep(nil)
+	assert.Equal(t, 0, ts.skipCursor, "should start on endpoint")
+
+	// Pressing 's' in endpoint input should NOT skip — it should type 's'.
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	assert.False(t, ts.done, "pressing s in endpoint input should not skip")
+	assert.False(t, ts.skip)
+}
+
+// ---------------------------------------------------------------------------
+// Keyring pre-fill tests
+// ---------------------------------------------------------------------------
+
+func TestKeysStep_PrefilledFlag(t *testing.T) {
+	// Create a keysStep and manually simulate pre-fill.
+	ks := newKeysStep(true, "OpenRouter", "https://openrouter.ai/api", false, "", "", false, "", "", false, "", "")
+	assert.Len(t, ks.entries, 1)
+
+	// Manually set prefilled (since we can't use real keyring in tests).
+	ks.entries[0].prefilled = true
+	ks.inputs[0].SetValue("sk-existing-key")
+	ks.collectedKeys["embed"] = "sk-existing-key"
+
+	// Pressing Enter without changes should keep the pre-filled key.
+	ks, _ = ks.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.True(t, ks.done)
+	assert.Equal(t, "sk-existing-key", ks.collectedKeys["embed"])
+}
+
+func TestKeysStep_PrefilledView(t *testing.T) {
+	ks := newKeysStep(true, "OpenRouter", "https://openrouter.ai/api", false, "", "", false, "", "", false, "", "")
+	ks.entries[0].prefilled = true
+
+	view := ks.View(80)
+	assert.Contains(t, view, "Existing API keys found", "should show pre-fill note")
+	assert.Contains(t, view, "(saved)", "should show saved indicator on entry")
+}
+
+func TestKeysStep_PrefilledOverwrite(t *testing.T) {
+	ks := newKeysStep(true, "OpenRouter", "https://openrouter.ai/api", false, "", "", false, "", "", false, "", "")
+	ks.entries[0].prefilled = true
+	ks.inputs[0].SetValue("sk-old-key")
+	ks.collectedKeys["embed"] = "sk-old-key"
+
+	// Type a new key (simulate by setting value directly).
+	ks.inputs[0].SetValue("sk-new-key")
+
+	// Press Enter — should use the new value.
+	ks, _ = ks.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.True(t, ks.done)
+	assert.Equal(t, "sk-new-key", ks.collectedKeys["embed"], "new key should overwrite old")
+}
+
+func TestKeysStep_NoPrefillNote_WhenNoPrefill(t *testing.T) {
+	ks := newKeysStep(true, "OpenRouter", "https://openrouter.ai/api", false, "", "", false, "", "", false, "", "")
+
+	view := ks.View(80)
+	assert.NotContains(t, view, "Existing API keys found", "should not show pre-fill note when no keys pre-filled")
+	assert.NotContains(t, view, "(saved)")
 }
 
 // ---------------------------------------------------------------------------
