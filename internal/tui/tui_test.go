@@ -4,11 +4,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/KHAEntertainment/markedup/config"
 	"github.com/KHAEntertainment/markedup/index"
 	"github.com/KHAEntertainment/markedup/schema"
 )
@@ -66,7 +68,7 @@ func writeTestFile(dir, name, content string) error {
 
 func TestNewModel_EmptyIndex(t *testing.T) {
 	idx := buildTestIndex(t)
-	m := NewModel(idx)
+	m := NewModel(idx, ".", nil)
 
 	assert.True(t, m.empty)
 	// Empty index should show onboarding screen, not search.
@@ -85,7 +87,7 @@ func TestNewModel_WithPages(t *testing.T) {
 		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", EntityType: "concept", Confidence: 0.9}},
 	)
 
-	m := NewModel(idx)
+	m := NewModel(idx, ".", nil)
 	assert.False(t, m.empty)
 	// With pages, should start at home screen.
 	assert.Equal(t, viewHome, m.current)
@@ -99,7 +101,7 @@ func TestModel_WindowResize(t *testing.T) {
 	idx := buildTestIndex(t,
 		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
 	)
-	m := NewModel(idx)
+	m := NewModel(idx, ".", nil)
 
 	resized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	rm := resized.(Model)
@@ -113,7 +115,7 @@ func TestModel_QuitOnCtrlC(t *testing.T) {
 	idx := buildTestIndex(t,
 		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
 	)
-	m := NewModel(idx)
+	m := NewModel(idx, ".", nil)
 
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	require.NotNil(t, cmd)
@@ -127,7 +129,7 @@ func TestModel_QuitOnQ_EmptyInput(t *testing.T) {
 	idx := buildTestIndex(t,
 		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
 	)
-	m := NewModel(idx)
+	m := NewModel(idx, ".", nil)
 
 	// q with empty input should quit.
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
@@ -300,7 +302,7 @@ func TestModel_ViewTransitions(t *testing.T) {
 		},
 	)
 
-	m := NewModel(idx)
+	m := NewModel(idx, ".", nil)
 	// With pages, starts at home screen.
 	assert.Equal(t, viewHome, m.current)
 
@@ -361,8 +363,11 @@ func TestHomeModel_Navigation(t *testing.T) {
 	v := m.View()
 	assert.Contains(t, v, "Search")
 	assert.Contains(t, v, "Explore")
-	assert.Contains(t, v, "Graph")
+	assert.Contains(t, v, "Enrich")
+	assert.Contains(t, v, "Embed")
 	assert.Contains(t, v, "Settings")
+	// "Graph" menu item removed; only appears in subtitle "Knowledge Graph Terminal UI"
+	assert.NotContains(t, v, "Graph overview")
 }
 
 func TestOnboardingModel_View(t *testing.T) {
@@ -376,4 +381,177 @@ func TestOnboardingModel_View(t *testing.T) {
 	assert.Contains(t, v, "markedup enrich .")
 	assert.Contains(t, v, "markedup embed .")
 	assert.Contains(t, v, "markedup tui")
+}
+
+// --------------------------------------------------------------------------
+// New tests for Wave 5 features
+// --------------------------------------------------------------------------
+
+func TestHomeModel_Items(t *testing.T) {
+	m := newHomeModel()
+	m.width = 80
+	m.height = 24
+
+	// Exactly 5 menu items.
+	assert.Len(t, homeMenuItems, 5)
+	assert.Equal(t, "Search", homeMenuItems[homeMenuSearch].label)
+	assert.Equal(t, "Explore", homeMenuItems[homeMenuExplore].label)
+	assert.Equal(t, "Enrich", homeMenuItems[homeMenuEnrich].label)
+	assert.Equal(t, "Embed", homeMenuItems[homeMenuEmbed].label)
+	assert.Equal(t, "Settings", homeMenuItems[homeMenuSettings].label)
+
+	// Graph item is gone.
+	for _, item := range homeMenuItems {
+		assert.NotEqual(t, "Graph", item.label)
+	}
+
+	// View renders all items.
+	v := m.View()
+	assert.Contains(t, v, "Search")
+	assert.Contains(t, v, "Explore")
+	assert.Contains(t, v, "Enrich")
+	assert.Contains(t, v, "Embed")
+	assert.Contains(t, v, "Settings")
+}
+
+func TestHomeModel_TaskRunning_DisablesEnrichEmbed(t *testing.T) {
+	m := newHomeModel()
+	m.width = 80
+	m.height = 24
+	m.taskRunning = true
+
+	v := m.View()
+	assert.Contains(t, v, "Enrich (running...)")
+	assert.Contains(t, v, "Embed (running...)")
+}
+
+func TestStatusModel_View_Idle(t *testing.T) {
+	s := statusModel{state: taskIdle}
+	v := s.View(80)
+	assert.Equal(t, "", v)
+}
+
+func TestStatusModel_View_Running(t *testing.T) {
+	s := statusModel{state: taskRunning, taskName: "Enrich"}
+	v := s.View(80)
+	assert.Contains(t, v, "Enrich")
+	assert.Contains(t, v, "ing...")
+}
+
+func TestStatusModel_View_Done(t *testing.T) {
+	s := statusModel{state: taskDone, taskName: "Enrich"}
+	v := s.View(80)
+	assert.Contains(t, v, "✓")
+	assert.Contains(t, v, "Enrich")
+	assert.Contains(t, v, "complete")
+}
+
+func TestStatusModel_View_Error(t *testing.T) {
+	s := statusModel{state: taskError, taskName: "Embed", message: "connection refused"}
+	v := s.View(80)
+	assert.Contains(t, v, "✗")
+	assert.Contains(t, v, "Embed")
+	assert.Contains(t, v, "failed")
+	assert.Contains(t, v, "connection refused")
+}
+
+func TestStatusModel_ShouldDismiss(t *testing.T) {
+	// Not done — should not dismiss.
+	s := statusModel{state: taskRunning}
+	assert.False(t, s.shouldDismiss())
+
+	// Done but dismissAt in the future.
+	s = statusModel{state: taskDone, dismissAt: time.Now().Add(10 * time.Second)}
+	assert.False(t, s.shouldDismiss())
+
+	// Done and dismissAt in the past.
+	s = statusModel{state: taskDone, dismissAt: time.Now().Add(-1 * time.Second)}
+	assert.True(t, s.shouldDismiss())
+
+	// Error and dismissAt in the past.
+	s = statusModel{state: taskError, dismissAt: time.Now().Add(-1 * time.Second)}
+	assert.True(t, s.shouldDismiss())
+}
+
+func TestSettingsModel_View(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Embed.Endpoint = "http://localhost:11434/v1"
+	cfg.Embed.Model = "nomic-embed-text"
+	cfg.LLM.Endpoint = "http://localhost:11434"
+	cfg.LLM.Model = "llama3"
+
+	m := newSettingsModel(cfg, 80, 24)
+	v := m.View()
+
+	assert.Contains(t, v, "Settings")
+	assert.Contains(t, v, "Embed")
+	assert.Contains(t, v, "http://localhost:11434/v1")
+	assert.Contains(t, v, "nomic-embed-text")
+	assert.Contains(t, v, "LLM")
+	assert.Contains(t, v, "llama3")
+	assert.Contains(t, v, "Rerank")
+	assert.Contains(t, v, "Triplex")
+	assert.Contains(t, v, "markedup setup")
+	assert.Contains(t, v, "esc/h: back")
+}
+
+func TestSettingsModel_View_NilConfig(t *testing.T) {
+	m := newSettingsModel(nil, 80, 24)
+	v := m.View()
+	assert.Contains(t, v, "Settings")
+	assert.Contains(t, v, "not configured")
+}
+
+func TestModel_Settings_Navigation(t *testing.T) {
+	idx := buildTestIndex(t,
+		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
+	)
+	m := NewModel(idx, ".", nil)
+	assert.Equal(t, viewHome, m.current)
+
+	// Navigate down to Settings (index 4).
+	for i := 0; i < homeMenuSettings; i++ {
+		m.home.cursor = i + 1
+	}
+	m.home.cursor = homeMenuSettings
+
+	// Press Enter on Settings.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	assert.Equal(t, viewSettings, m.current)
+
+	// Esc returns to home.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	assert.Equal(t, viewHome, m.current)
+}
+
+func TestModel_ExploreMode_Header(t *testing.T) {
+	idx := buildTestIndex(t,
+		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
+	)
+	m := NewModel(idx, ".", nil)
+
+	// Navigate to Explore from home.
+	m.home.cursor = homeMenuExplore
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	assert.Equal(t, viewSearch, m.current)
+	assert.True(t, m.search.exploreMode)
+
+	v := m.View()
+	assert.Contains(t, v, "Explore Mode")
+	assert.Contains(t, v, "tab to traverse")
+}
+
+func TestModel_StatusBar_AppendedToView(t *testing.T) {
+	idx := buildTestIndex(t,
+		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
+	)
+	m := NewModel(idx, ".", nil)
+	m.status = statusModel{state: taskDone, taskName: "Enrich"}
+
+	v := m.View()
+	assert.Contains(t, v, "✓")
+	assert.Contains(t, v, "Enrich")
 }

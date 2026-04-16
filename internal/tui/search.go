@@ -22,14 +22,15 @@ type debounceMsg struct {
 // searchModel implements the search view: a text input with real-time
 // filtered results.
 type searchModel struct {
-	idx      *index.KnowledgeIndex
-	input    textinput.Model
-	results  []index.Result
-	cursor   int
-	width    int
-	height   int
-	lastQuery string
+	idx           *index.KnowledgeIndex
+	input         textinput.Model
+	results       []index.Result
+	cursor        int
+	width         int
+	height        int
+	lastQuery     string
 	debounceTimer *time.Timer
+	exploreMode   bool // when true, show explore-oriented header/hint
 }
 
 func newSearchModel(idx *index.KnowledgeIndex) searchModel {
@@ -111,9 +112,19 @@ func (m searchModel) View() string {
 	var b strings.Builder
 
 	// Header.
-	header := headerStyle.Width(m.width).Render("Search")
+	headerText := "Search"
+	if m.exploreMode {
+		headerText = "Explore"
+	}
+	header := headerStyle.Width(m.width).Render(headerText)
 	b.WriteString(header)
 	b.WriteString("\n\n")
+
+	// Explore mode subtitle.
+	if m.exploreMode {
+		b.WriteString(subtitleStyle.Render("Explore Mode — search for an entity, then tab to traverse its connections"))
+		b.WriteString("\n\n")
+	}
 
 	// Input.
 	b.WriteString(m.input.View())
@@ -175,7 +186,11 @@ func (m searchModel) View() string {
 
 	// Help.
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("enter: view  |  tab: explore  |  esc/h: home  |  q/ctrl+c: quit"))
+	if m.exploreMode {
+		b.WriteString(helpStyle.Render("tab: traverse connections  |  enter: view doc  |  esc/h: home  |  q/ctrl+c: quit"))
+	} else {
+		b.WriteString(helpStyle.Render("enter: view  |  tab: explore  |  esc/h: home  |  q/ctrl+c: quit"))
+	}
 
 	return b.String()
 }
