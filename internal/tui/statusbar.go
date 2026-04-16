@@ -50,8 +50,10 @@ func (m statusModel) View(width int) string {
 		msg := fmt.Sprintf("%s %sing...", frame, m.taskName)
 		return helpStyle.Render(msg)
 	case taskDone:
-		msg := fmt.Sprintf("✓ %s complete", m.taskName)
-		return selectedStyle.Render(msg)
+		if m.message != "" {
+			return selectedStyle.Render(fmt.Sprintf("✓ %s: %s", m.taskName, m.message))
+		}
+		return selectedStyle.Render(fmt.Sprintf("✓ %s complete", m.taskName))
 	case taskError:
 		msg := fmt.Sprintf("✗ %s failed: %s", m.taskName, m.message)
 		return warningStyle.Render(msg)

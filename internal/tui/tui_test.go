@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/KHAEntertainment/markedup/config"
 	"github.com/KHAEntertainment/markedup/index"
 	"github.com/KHAEntertainment/markedup/schema"
 )
@@ -439,11 +438,20 @@ func TestStatusModel_View_Running(t *testing.T) {
 }
 
 func TestStatusModel_View_Done(t *testing.T) {
+	// Without message: shows "complete".
 	s := statusModel{state: taskDone, taskName: "Enrich"}
 	v := s.View(80)
 	assert.Contains(t, v, "✓")
 	assert.Contains(t, v, "Enrich")
 	assert.Contains(t, v, "complete")
+
+	// With message: shows task output instead of "complete".
+	s2 := statusModel{state: taskDone, taskName: "Enrich", message: "11 files: 0 enriched, 11 skipped, 0 errors"}
+	v2 := s2.View(80)
+	assert.Contains(t, v2, "✓")
+	assert.Contains(t, v2, "Enrich")
+	assert.Contains(t, v2, "11 files: 0 enriched, 11 skipped, 0 errors")
+	assert.NotContains(t, v2, "complete")
 }
 
 func TestStatusModel_View_Error(t *testing.T) {
@@ -473,57 +481,29 @@ func TestStatusModel_ShouldDismiss(t *testing.T) {
 	assert.True(t, s.shouldDismiss())
 }
 
-func TestSettingsModel_View(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Embed.Endpoint = "http://localhost:11434/v1"
-	cfg.Embed.Model = "nomic-embed-text"
-	cfg.LLM.Endpoint = "http://localhost:11434"
-	cfg.LLM.Model = "llama3"
-
-	m := newSettingsModel(cfg, 80, 24)
-	v := m.View()
-
-	assert.Contains(t, v, "Settings")
-	assert.Contains(t, v, "Embed")
-	assert.Contains(t, v, "http://localhost:11434/v1")
-	assert.Contains(t, v, "nomic-embed-text")
-	assert.Contains(t, v, "LLM")
-	assert.Contains(t, v, "llama3")
-	assert.Contains(t, v, "Rerank")
-	assert.Contains(t, v, "Triplex")
-	assert.Contains(t, v, "markedup setup")
-	assert.Contains(t, v, "esc/h: back")
+func TestModel_Settings_LaunchesSetup(t *testing.T) {
+	// Verify that Settings is menu index 4 and has the right label.
+	assert.Equal(t, 4, homeMenuSettings)
+	assert.Equal(t, "Settings", homeMenuItems[homeMenuSettings].label)
 }
 
-func TestSettingsModel_View_NilConfig(t *testing.T) {
-	m := newSettingsModel(nil, 80, 24)
-	v := m.View()
-	assert.Contains(t, v, "Settings")
-	assert.Contains(t, v, "not configured")
-}
-
-func TestModel_Settings_Navigation(t *testing.T) {
-	idx := buildTestIndex(t,
-		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
-	)
-	m := NewModel(idx, ".", nil)
-	assert.Equal(t, viewHome, m.current)
-
-	// Navigate down to Settings (index 4).
-	for i := 0; i < homeMenuSettings; i++ {
-		m.home.cursor = i + 1
+func TestLastMeaningfulLine(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{"empty string", "", ""},
+		{"single line", "hello", "hello"},
+		{"multiline with trailing blanks", "first\nsecond\nthird\n\n  \n", "third"},
+		{"all blank lines", "  \n  \n  ", ""},
+		{"multiline normal", "Enriched 0 files. 11 skipped. 0 errors.\n", "Enriched 0 files. 11 skipped. 0 errors."},
 	}
-	m.home.cursor = homeMenuSettings
-
-	// Press Enter on Settings.
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = updated.(Model)
-	assert.Equal(t, viewSettings, m.current)
-
-	// Esc returns to home.
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m = updated.(Model)
-	assert.Equal(t, viewHome, m.current)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expect, lastMeaningfulLine(tt.input))
+		})
+	}
 }
 
 func TestModel_ExploreMode_Header(t *testing.T) {

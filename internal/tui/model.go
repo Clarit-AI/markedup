@@ -22,7 +22,6 @@ const (
 	viewDocument
 	viewExplore
 	viewOnboarding
-	viewSettings
 )
 
 // homeMenuSearch is the menu index for Search.
@@ -51,7 +50,6 @@ type Model struct {
 	doc         docModel
 	explore     exploreModel
 	onboarding  onboardingModel
-	settings    settingsModel
 	status      statusModel
 	taskRunning bool
 	width       int
@@ -76,7 +74,6 @@ func NewModel(idx *index.KnowledgeIndex, kbDir string, cfg *config.Config) Model
 		home:       newHomeModel(),
 		search:     newSearchModel(idx),
 		onboarding: newOnboardingModel(),
-		settings:   newSettingsModel(cfg, 0, 0),
 		empty:      empty,
 	}
 }
@@ -106,8 +103,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.explore.height = msg.Height
 		m.onboarding.width = msg.Width
 		m.onboarding.height = msg.Height
-		m.settings.width = msg.Width
-		m.settings.height = msg.Height
 
 		// Re-init doc viewport on resize if viewing doc.
 		if m.current == viewDocument {
@@ -150,13 +145,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				state:     taskError,
 				taskName:  msg.taskName,
 				message:   errDetail,
-				dismissAt: time.Now().Add(5 * time.Second),
+				dismissAt: time.Now().Add(8 * time.Second),
 			}
 		} else {
 			m.status = statusModel{
 				state:     taskDone,
 				taskName:  msg.taskName,
-				dismissAt: time.Now().Add(5 * time.Second),
+				message:   lastMeaningfulLine(msg.output),
+				dismissAt: time.Now().Add(8 * time.Second),
 			}
 			// Reload the index so newly enriched/embedded pages appear.
 			if m.kbDir != "" {
@@ -170,6 +166,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, dismissTick()
+
+	case setupDoneMsg:
+		// Reload config after setup completes.
+		if msg.err == nil {
+			if newCfg, loadErr := config.Load(m.kbDir); loadErr == nil {
+				m.cfg = newCfg
+			}
+		}
+		// Return to home regardless of error.
+		m.current = viewHome
+		return m, nil
 
 	case tea.KeyMsg:
 		// Global quit keys.
@@ -216,8 +223,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateDocument(msg)
 	case viewExplore:
 		return m.updateExplore(msg)
-	case viewSettings:
-		return m.updateSettings(msg)
 	}
 
 	return m, nil
@@ -268,9 +273,10 @@ func (m Model) updateHome(msg tea.Msg) (tea.Model, tea.Cmd) {
 					spinnerTick(),
 				)
 			case homeMenuSettings:
-				m.settings = newSettingsModel(m.cfg, m.width, m.height)
-				m.current = viewSettings
-				return m, nil
+				c := exec.Command("markedup", "setup")
+				return m, tea.ExecProcess(c, func(err error) tea.Msg {
+					return setupDoneMsg{err: err}
+				})
 			}
 		}
 	}
@@ -366,17 +372,6 @@ func (m Model) updateExplore(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		switch keyMsg.String() {
-		case "esc", "h":
-			m.current = viewHome
-			return m, nil
-		}
-	}
-	return m, nil
-}
-
 // navigateToNode follows a link in the explore view.
 func (m *Model) navigateToNode(page *schema.Page) {
 	m.explore = newExploreModel(m.idx, page)
@@ -398,8 +393,6 @@ func (m Model) View() string {
 		content = m.doc.View()
 	case viewExplore:
 		content = m.explore.View()
-	case viewSettings:
-		content = m.settings.View()
 	}
 
 	// Append status bar if there is something to show.
@@ -408,6 +401,23 @@ func (m Model) View() string {
 		return content + "\n" + statusLine
 	}
 	return content
+}
+
+// setupDoneMsg is sent when the `markedup setup` subprocess finishes.
+type setupDoneMsg struct {
+	err error
+}
+
+// lastMeaningfulLine returns the last non-empty line from output.
+func lastMeaningfulLine(output string) string {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 // runBackgroundTask runs a subprocess to completion in a goroutine and returns
