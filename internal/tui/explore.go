@@ -178,7 +178,7 @@ func (m exploreModel) View() string {
 
 	// Help.
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("enter: follow link  |  esc/backspace: search  |  tab: view doc  |  q/ctrl+c: quit"))
+	b.WriteString(helpStyle.Render("enter: follow link  |  esc/backspace: search  |  tab: view doc  |  h: home  |  q/ctrl+c: quit"))
 
 	return b.String()
 }

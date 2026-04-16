@@ -175,7 +175,7 @@ func (m searchModel) View() string {
 
 	// Help.
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("enter: view  |  tab: explore  |  q/ctrl+c: quit"))
+	b.WriteString(helpStyle.Render("enter: view  |  tab: explore  |  esc/h: home  |  q/ctrl+c: quit"))
 
 	return b.String()
 }

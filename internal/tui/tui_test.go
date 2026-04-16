@@ -69,10 +69,15 @@ func TestNewModel_EmptyIndex(t *testing.T) {
 	m := NewModel(idx)
 
 	assert.True(t, m.empty)
-	assert.Equal(t, viewSearch, m.current)
+	// Empty index should show onboarding screen, not search.
+	assert.Equal(t, viewOnboarding, m.current)
 
 	v := m.View()
-	assert.Contains(t, v, "No markdown files found")
+	assert.Contains(t, v, "Getting Started")
+	assert.Contains(t, v, "No pages found in this knowledge base")
+	assert.Contains(t, v, "markedup enrich .")
+	assert.Contains(t, v, "markedup embed .")
+	assert.Contains(t, v, "markedup tui")
 }
 
 func TestNewModel_WithPages(t *testing.T) {
@@ -82,7 +87,12 @@ func TestNewModel_WithPages(t *testing.T) {
 
 	m := NewModel(idx)
 	assert.False(t, m.empty)
-	assert.Equal(t, viewSearch, m.current)
+	// With pages, should start at home screen.
+	assert.Equal(t, viewHome, m.current)
+
+	v := m.View()
+	assert.Contains(t, v, "markedup")
+	assert.Contains(t, v, "Search")
 }
 
 func TestModel_WindowResize(t *testing.T) {
@@ -291,6 +301,12 @@ func TestModel_ViewTransitions(t *testing.T) {
 	)
 
 	m := NewModel(idx)
+	// With pages, starts at home screen.
+	assert.Equal(t, viewHome, m.current)
+
+	// Enter on Search menu item (index 0) to go to search view.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
 	assert.Equal(t, viewSearch, m.current)
 
 	// Simulate having search results.
@@ -298,7 +314,7 @@ func TestModel_ViewTransitions(t *testing.T) {
 	require.Greater(t, len(m.search.results), 0)
 
 	// Enter to go to document view.
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
 	assert.Equal(t, viewDocument, m.current)
 
@@ -316,4 +332,48 @@ func TestModel_ViewTransitions(t *testing.T) {
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = updated.(Model)
 	assert.Equal(t, viewSearch, m.current)
+
+	// h to return to home.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	m = updated.(Model)
+	assert.Equal(t, viewHome, m.current)
+}
+
+func TestHomeModel_Navigation(t *testing.T) {
+	m := newHomeModel()
+	m.width = 80
+	m.height = 24
+
+	assert.Equal(t, 0, m.cursor)
+
+	// Navigate down.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	assert.Equal(t, 1, m.cursor)
+
+	// Navigate up.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	assert.Equal(t, 0, m.cursor)
+
+	// Can't go above 0.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	assert.Equal(t, 0, m.cursor)
+
+	v := m.View()
+	assert.Contains(t, v, "Search")
+	assert.Contains(t, v, "Explore")
+	assert.Contains(t, v, "Graph")
+	assert.Contains(t, v, "Settings")
+}
+
+func TestOnboardingModel_View(t *testing.T) {
+	m := newOnboardingModel()
+	m.width = 80
+	m.height = 24
+
+	v := m.View()
+	assert.Contains(t, v, "Getting Started")
+	assert.Contains(t, v, "No pages found in this knowledge base")
+	assert.Contains(t, v, "markedup enrich .")
+	assert.Contains(t, v, "markedup embed .")
+	assert.Contains(t, v, "markedup tui")
 }
