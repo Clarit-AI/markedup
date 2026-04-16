@@ -132,10 +132,19 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 		if enrichEndpoint == "" {
 			return fmt.Errorf("--endpoint is required when --model is specified")
 		}
+
+		// Detect Triplex format: use FormatTriplex when the model came from
+		// the Triplex config section (not the LLM fallback).
+		modelFormat := enrich.FormatGeneric
+		if appConfig.Triplex.Endpoint != "" && enrichEndpoint == appConfig.Triplex.Endpoint {
+			modelFormat = enrich.FormatTriplex
+		}
+
 		modelExtractor = enrich.NewModelExtractor(enrich.ModelConfig{
 			Endpoint: enrichEndpoint,
 			Model:    enrichModel,
 			APIKey:   enrichAPIKey,
+			Format:   modelFormat,
 		})
 		if enrichEntityTypes != "" {
 			entityTypes = strings.Split(enrichEntityTypes, ",")
