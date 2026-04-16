@@ -27,6 +27,7 @@ var (
 	enrichAPIKey      string
 	enrichEntityTypes string
 	enrichPredicates  string
+	enrichTimeout     time.Duration
 )
 
 func newEnrichCmd() *cobra.Command {
@@ -52,6 +53,7 @@ Partial frontmatter is filled in without overwriting existing fields.`,
 	cmd.Flags().StringVar(&enrichAPIKey, "api-key", "", "API key for model endpoint (optional)")
 	cmd.Flags().StringVar(&enrichEntityTypes, "entity-types", "", "comma-separated entity types for model extraction")
 	cmd.Flags().StringVar(&enrichPredicates, "predicates", "", "comma-separated relationship predicates for model extraction")
+	cmd.Flags().DurationVar(&enrichTimeout, "timeout", 5*time.Minute, "timeout per file for model extraction (e.g. 5m, 10m)")
 
 	return cmd
 }
@@ -196,7 +198,7 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 			}
 			fmt.Fprintf(out, "Model enriching %s...\n", relPath)
 
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), enrichTimeout)
 			modelResult, modelErr := modelExtractor.Extract(ctx, page.Body, entityTypes, predicates)
 			cancel()
 
@@ -209,7 +211,7 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 			// Generate summary (separate call for focused one-sentence output).
 			if merged.Summary == "" || enrichForce {
 				bodyPreview := enrich.BodyPreview(page.Body, 500)
-				summaryCtx, summaryCancel := context.WithTimeout(context.Background(), 1*time.Minute)
+				summaryCtx, summaryCancel := context.WithTimeout(context.Background(), enrichTimeout)
 				summary, summaryErr := modelExtractor.GenerateSummary(summaryCtx, merged.Title, merged.EntityType, merged.Tags, bodyPreview)
 				summaryCancel()
 
