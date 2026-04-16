@@ -449,7 +449,148 @@ func (p providerStep) View(width int) string {
 }
 
 // ---------------------------------------------------------------------------
-// API Keys step (step 4)
+// Triplex step (step 4)
+// ---------------------------------------------------------------------------
+
+// triplexModelName is the fixed model name for the Triplex fine-tune.
+// This matches the model identifier used in enrich/model.go (FormatTriplex).
+const triplexModelName = "Phi-3-mini-128k-instruct/triplex"
+
+// triplexDescription explains what Triplex does and why it is optional.
+const triplexDescription = "Triplex extracts entities and relationships from your notes to build a\nrich knowledge graph. It is optional but highly recommended — without it,\nmarkedup uses your general LLM for extraction (lower quality).\n\nTriplex is a Phi-3-mini-128k-instruct fine-tune and runs locally via Ollama\nor a compatible OpenAI-compatible endpoint. You do not choose the model name\n— it is fixed."
+
+// triplexStep is the wizard sub-model for configuring the Triplex extraction model.
+// Unlike providerStep, there is no model picker — the model name is fixed.
+type triplexStep struct {
+	endpointIn textinput.Model
+	skip       bool
+	done       bool
+	needsKey   bool
+	selected   config.ServiceConfig
+	// skipCursor: 0 = endpoint input focused, 1 = Skip option highlighted
+	skipCursor int
+}
+
+// newTriplexStep creates the Triplex configuration step.
+// If Ollama was among the detected endpoints, the endpoint is pre-filled.
+func newTriplexStep(detected []config.Endpoint) triplexStep {
+	ei := textinput.New()
+	ei.Placeholder = "http://localhost:11434"
+	ei.CharLimit = 256
+	ei.Width = 50
+
+	// Pre-fill Ollama endpoint if detected.
+	for _, ep := range detected {
+		if ep.URL == "http://localhost:11434" || ep.Type == "multi" {
+			ei.SetValue(ep.URL)
+			break
+		}
+	}
+
+	ei.Focus()
+
+	return triplexStep{
+		endpointIn: ei,
+	}
+}
+
+func (t triplexStep) Update(msg tea.Msg) (triplexStep, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "s", "S":
+			// S key skips directly.
+			t.skip = true
+			t.done = true
+			return t, nil
+		case "tab", "down":
+			// Move focus between endpoint input and skip option.
+			if t.skipCursor == 0 {
+				t.endpointIn.Blur()
+				t.skipCursor = 1
+			} else {
+				t.skipCursor = 0
+				t.endpointIn.Focus()
+				return t, textinput.Blink
+			}
+		case "up":
+			if t.skipCursor == 1 {
+				t.skipCursor = 0
+				t.endpointIn.Focus()
+				return t, textinput.Blink
+			}
+		case "enter":
+			if t.skipCursor == 1 {
+				// Skip selected.
+				t.skip = true
+				t.done = true
+				return t, nil
+			}
+			// Confirm endpoint.
+			val := strings.TrimSpace(t.endpointIn.Value())
+			if val == "" {
+				return t, nil
+			}
+			t.selected.Endpoint = val
+			t.selected.Model = triplexModelName
+			// Cloud endpoint needs an API key; localhost does not.
+			t.needsKey = !strings.Contains(val, "localhost") && !strings.Contains(val, "127.0.0.1")
+			t.done = true
+			return t, nil
+		case "esc":
+			// Esc is handled by the wizard orchestrator (goes back to rerank).
+			return t, nil
+		default:
+			if t.skipCursor == 0 {
+				var cmd tea.Cmd
+				t.endpointIn, cmd = t.endpointIn.Update(msg)
+				return t, cmd
+			}
+		}
+	default:
+		if t.skipCursor == 0 {
+			var cmd tea.Cmd
+			t.endpointIn, cmd = t.endpointIn.Update(msg)
+			return t, cmd
+		}
+	}
+	return t, nil
+}
+
+func (t triplexStep) View(width int) string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle.Width(width).Render("Triple Extraction (Triplex)"))
+	b.WriteString("\n\n")
+	b.WriteString(triplexDescription)
+	b.WriteString("\n\n")
+
+	// Fixed model display.
+	b.WriteString(labelStyle.Render("Model: "))
+	b.WriteString(mutedStyle.Render("Phi-3-mini-128k-instruct (Triplex fine-tune)"))
+	b.WriteString("\n\n")
+
+	// Endpoint input.
+	b.WriteString(labelStyle.Render("Endpoint URL:"))
+	b.WriteString("\n")
+	b.WriteString(t.endpointIn.View())
+	b.WriteString("\n\n")
+
+	// Skip option.
+	skipLabel := "  Skip — use LLM for extraction instead (lower quality)"
+	if t.skipCursor == 1 {
+		b.WriteString(selectedStyle.Render("> " + strings.TrimSpace(skipLabel)))
+	} else {
+		b.WriteString(subtitleStyle.Render(skipLabel))
+	}
+	b.WriteString("\n\n")
+
+	b.WriteString(helpStyle.Render("Enter: confirm  |  S: skip  |  Tab/↑↓: navigate  |  Esc: back  |  Ctrl+C: cancel"))
+	return b.String()
+}
+
+// ---------------------------------------------------------------------------
+// API Keys step (step 5)
 // ---------------------------------------------------------------------------
 
 // keyEntry represents one API key to collect.
@@ -477,6 +618,7 @@ func newKeysStep(
 	needEmbed bool, embedLabel, embedEndpoint string,
 	needLLM bool, llmLabel, llmEndpoint string,
 	needRerank bool, rerankLabel, rerankEndpoint string,
+	needTriplex bool, triplexLabel, triplexEndpoint string,
 ) keysStep {
 	type svcInfo struct {
 		service  string
@@ -493,6 +635,9 @@ func newKeysStep(
 	}
 	if needRerank {
 		candidates = append(candidates, svcInfo{"rerank", rerankLabel, rerankEndpoint})
+	}
+	if needTriplex {
+		candidates = append(candidates, svcInfo{"triplex", triplexLabel, triplexEndpoint})
 	}
 
 	// Deduplicate by endpoint. The first service to claim an endpoint becomes
@@ -638,7 +783,7 @@ func (k keysStep) View(width int) string {
 }
 
 // ---------------------------------------------------------------------------
-// Confirm step (step 5)
+// Confirm step (step 6)
 // ---------------------------------------------------------------------------
 
 type confirmStep struct {
@@ -699,6 +844,17 @@ func (c confirmStep) View(width int) string {
 		}
 	} else {
 		b.WriteString(mutedStyle.Render("  (not configured)"))
+		b.WriteString("\n")
+	}
+
+	// Triplex.
+	b.WriteString(labelStyle.Render("Triplex:"))
+	b.WriteString("\n")
+	if c.cfg.Triplex.Endpoint != "" {
+		b.WriteString(fmt.Sprintf("  URL:      %s\n", c.cfg.Triplex.Endpoint))
+		b.WriteString(fmt.Sprintf("  Model:    %s\n", c.cfg.Triplex.Model))
+	} else {
+		b.WriteString(mutedStyle.Render("  not configured (using LLM for extraction)"))
 		b.WriteString("\n")
 	}
 

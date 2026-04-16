@@ -22,7 +22,7 @@ func TestWizardModel_CtrlC_Cancels(t *testing.T) {
 	m := newWizardModel()
 
 	// Ctrl+C at any step should cancel.
-	for step := 0; step < 6; step++ {
+	for step := 0; step < 7; step++ {
 		m.step = step
 		result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 		wm := result.(wizardModel)
@@ -194,13 +194,13 @@ func TestProviderStep_RerankFormat(t *testing.T) {
 }
 
 func TestKeysStep_NoKeys(t *testing.T) {
-	ks := newKeysStep(false, "", "", false, "", "", false, "", "")
+	ks := newKeysStep(false, "", "", false, "", "", false, "", "", false, "", "")
 	ks, _ = ks.Update(nil)
 	assert.True(t, ks.done)
 }
 
 func TestKeysStep_WithKeys(t *testing.T) {
-	ks := newKeysStep(true, "Ollama", "http://localhost:11434", false, "", "", false, "", "")
+	ks := newKeysStep(true, "Ollama", "http://localhost:11434", false, "", "", false, "", "", false, "", "")
 	assert.Len(t, ks.entries, 1)
 	assert.Equal(t, "embed", ks.entries[0].service)
 }
@@ -275,8 +275,13 @@ func TestWizardModel_FullFlow_SkipAll(t *testing.T) {
 	// Skip Rerank (pre-selected on Skip for optional).
 	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = result.(wizardModel)
+	assert.Equal(t, 4, m.step) // Triplex step
+
+	// Skip Triplex by pressing S.
+	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = result.(wizardModel)
 	// Should jump to confirm since no keys needed.
-	assert.Equal(t, 5, m.step)
+	assert.Equal(t, 6, m.step)
 }
 
 func TestWizardModel_View_AllSteps(t *testing.T) {
@@ -285,7 +290,7 @@ func TestWizardModel_View_AllSteps(t *testing.T) {
 	m.height = 40
 
 	// Each step should render without panicking.
-	for step := 0; step < 6; step++ {
+	for step := 0; step < 7; step++ {
 		m.step = step
 		switch step {
 		case 1:
@@ -295,8 +300,10 @@ func TestWizardModel_View_AllSteps(t *testing.T) {
 		case 3:
 			m.rerank = newProviderStep("Rerank", "", nil, "rerank", true, true)
 		case 4:
-			m.keys = newKeysStep(true, "Ollama", "http://localhost:11434", false, "", "", false, "", "")
+			m.triplex = newTriplexStep(nil)
 		case 5:
+			m.keys = newKeysStep(true, "Ollama", "http://localhost:11434", false, "", "", false, "", "", false, "", "")
+		case 6:
 			m.confirm = newConfirmStep(m.config, "", nil)
 		}
 
@@ -308,6 +315,145 @@ func TestWizardModel_View_AllSteps(t *testing.T) {
 		assert.Contains(t, view, "Confirm")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Triplex step tests
+// ---------------------------------------------------------------------------
+
+func TestTriplexStep_Skip(t *testing.T) {
+	ts := newTriplexStep(nil)
+
+	// Press S to skip.
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	assert.True(t, ts.done, "skip should mark done")
+	assert.True(t, ts.skip, "skip should set skip=true")
+	assert.Equal(t, "", ts.selected.Endpoint, "selected endpoint should be zero value")
+	assert.Equal(t, "", ts.selected.Model, "selected model should be zero value")
+	assert.False(t, ts.needsKey, "skipped triplex should not need a key")
+}
+
+func TestTriplexStep_Configure_Localhost(t *testing.T) {
+	ts := newTriplexStep(nil)
+	ts.endpointIn.SetValue("http://localhost:11434")
+
+	// Press Enter to confirm.
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.True(t, ts.done)
+	assert.False(t, ts.skip)
+	assert.Equal(t, "http://localhost:11434", ts.selected.Endpoint)
+	assert.Equal(t, triplexModelName, ts.selected.Model)
+	assert.False(t, ts.needsKey, "localhost should not need a key")
+}
+
+func TestTriplexStep_Configure_CloudEndpoint(t *testing.T) {
+	ts := newTriplexStep(nil)
+	ts.endpointIn.SetValue("https://api.example.com")
+
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.True(t, ts.done)
+	assert.False(t, ts.skip)
+	assert.Equal(t, "https://api.example.com", ts.selected.Endpoint)
+	assert.Equal(t, triplexModelName, ts.selected.Model)
+	assert.True(t, ts.needsKey, "cloud endpoint should need a key")
+}
+
+func TestTriplexStep_Configure_EmptyEndpoint_NoAdvance(t *testing.T) {
+	ts := newTriplexStep(nil)
+	ts.endpointIn.SetValue("")
+
+	// Pressing Enter with empty endpoint should not advance.
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.False(t, ts.done, "empty endpoint should not confirm")
+}
+
+func TestTriplexStep_OllamaPreFill(t *testing.T) {
+	detected := []config.Endpoint{
+		{Name: "Ollama", URL: "http://localhost:11434", Type: "multi", Healthy: true},
+	}
+	ts := newTriplexStep(detected)
+	assert.Equal(t, "http://localhost:11434", ts.endpointIn.Value(), "ollama endpoint should be pre-filled")
+}
+
+func TestTriplexStep_CursorNavigation(t *testing.T) {
+	ts := newTriplexStep(nil)
+	assert.Equal(t, 0, ts.skipCursor, "should start with endpoint focused")
+
+	// Tab moves to skip option.
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyTab})
+	assert.Equal(t, 1, ts.skipCursor)
+
+	// Up moves back to endpoint.
+	ts, _ = ts.Update(tea.KeyMsg{Type: tea.KeyUp})
+	assert.Equal(t, 0, ts.skipCursor)
+}
+
+func TestTriplexStep_View(t *testing.T) {
+	ts := newTriplexStep(nil)
+	view := ts.View(80)
+	assert.Contains(t, view, "Triple Extraction (Triplex)")
+	assert.Contains(t, view, "Phi-3-mini-128k-instruct (Triplex fine-tune)")
+	assert.Contains(t, view, "Skip")
+}
+
+func TestWizardModel_TriplexStep(t *testing.T) {
+	m := newWizardModel()
+
+	// Complete detection.
+	result, _ := m.Update(detectDoneMsg{endpoints: nil})
+	m = result.(wizardModel)
+
+	// Advance to embed step.
+	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = result.(wizardModel)
+	assert.Equal(t, 1, m.step)
+
+	// Skip embed (navigate to last item and press Enter).
+	for m.embed.cursor < len(m.embed.choices)-1 {
+		result, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = result.(wizardModel)
+	}
+	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = result.(wizardModel)
+	assert.Equal(t, 2, m.step)
+
+	// Skip LLM.
+	for m.llm.cursor < len(m.llm.choices)-1 {
+		result, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = result.(wizardModel)
+	}
+	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = result.(wizardModel)
+	assert.Equal(t, 3, m.step)
+
+	// Skip Rerank (pre-selected on Skip).
+	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = result.(wizardModel)
+	assert.Equal(t, 4, m.step, "should advance to triplex step")
+
+	// Configure Triplex with localhost endpoint.
+	m.triplex.endpointIn.SetValue("http://localhost:11434")
+	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = result.(wizardModel)
+
+	// No cloud keys needed — should jump straight to confirm (step 6).
+	assert.Equal(t, 6, m.step, "no cloud keys → jump to confirm")
+	assert.Equal(t, "http://localhost:11434", m.config.Triplex.Endpoint)
+	assert.Equal(t, triplexModelName, m.config.Triplex.Model)
+}
+
+func TestWizardModel_EscFromTriplex_GoesBackToRerank(t *testing.T) {
+	m := newWizardModel()
+	m.step = 4
+	m.triplex = newTriplexStep(nil)
+	// Push rerank (step 3) onto the history stack as the wizard would.
+	m.stepHistory = []int{0, 1, 2, 3}
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	wm := result.(wizardModel)
+	assert.Equal(t, 3, wm.step, "Esc from triplex should go back to rerank")
+}
+
+// ---------------------------------------------------------------------------
 
 func TestProviderStep_CursorBounds(t *testing.T) {
 	ps := newProviderStep("Test", "", nil, "embed", false, false)
