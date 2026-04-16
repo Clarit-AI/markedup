@@ -1,8 +1,14 @@
 package tui
 
 import (
+	"context"
+	"os/exec"
+	"strings"
+	"time"
+
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/KHAEntertainment/markedup/config"
 	"github.com/KHAEntertainment/markedup/index"
 	"github.com/KHAEntertainment/markedup/schema"
 )
@@ -16,26 +22,47 @@ const (
 	viewDocument
 	viewExplore
 	viewOnboarding
+	viewSettings
 )
+
+// homeMenuSearch is the menu index for Search.
+const homeMenuSearch = 0
+
+// homeMenuExplore is the menu index for Explore.
+const homeMenuExplore = 1
+
+// homeMenuEnrich is the menu index for Enrich.
+const homeMenuEnrich = 2
+
+// homeMenuEmbed is the menu index for Embed.
+const homeMenuEmbed = 3
+
+// homeMenuSettings is the menu index for Settings.
+const homeMenuSettings = 4
 
 // Model is the top-level BubbleTea model that composes all views.
 type Model struct {
-	idx        *index.KnowledgeIndex
-	current    view
-	home       homeModel
-	search     searchModel
-	doc        docModel
-	explore    exploreModel
-	onboarding onboardingModel
-	width      int
-	height     int
-	empty      bool // true when index has zero pages
+	idx         *index.KnowledgeIndex
+	kbDir       string
+	cfg         *config.Config
+	current     view
+	home        homeModel
+	search      searchModel
+	doc         docModel
+	explore     exploreModel
+	onboarding  onboardingModel
+	settings    settingsModel
+	status      statusModel
+	taskRunning bool
+	width       int
+	height      int
+	empty       bool // true when index has zero pages
 }
 
 // NewModel creates the root TUI model from a loaded knowledge index.
 // If the index has zero pages, the onboarding screen is shown first.
 // Otherwise, the home/menu screen is shown.
-func NewModel(idx *index.KnowledgeIndex) Model {
+func NewModel(idx *index.KnowledgeIndex, kbDir string, cfg *config.Config) Model {
 	empty := idx.Pages() == 0
 	initial := viewHome
 	if empty {
@@ -43,10 +70,13 @@ func NewModel(idx *index.KnowledgeIndex) Model {
 	}
 	return Model{
 		idx:        idx,
+		kbDir:      kbDir,
+		cfg:        cfg,
 		current:    initial,
 		home:       newHomeModel(),
 		search:     newSearchModel(idx),
 		onboarding: newOnboardingModel(),
+		settings:   newSettingsModel(cfg, 0, 0),
 		empty:      empty,
 	}
 }
@@ -76,6 +106,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.explore.height = msg.Height
 		m.onboarding.width = msg.Width
 		m.onboarding.height = msg.Height
+		m.settings.width = msg.Width
+		m.settings.height = msg.Height
 
 		// Re-init doc viewport on resize if viewing doc.
 		if m.current == viewDocument {
@@ -84,6 +116,60 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.doc.initViewport()
 		}
 		return m, nil
+
+	case statusTickMsg:
+		if m.status.shouldDismiss() {
+			m.status = statusModel{state: taskIdle}
+			m.taskRunning = false
+			m.home.taskRunning = false
+			return m, nil
+		}
+		m.status = m.status.tick()
+		if m.status.state == taskRunning {
+			return m, spinnerTick()
+		}
+		// Done/error: keep ticking for auto-dismiss.
+		return m, dismissTick()
+
+	case taskDoneMsg:
+		m.taskRunning = false
+		m.home.taskRunning = false
+		if msg.err != nil {
+			// Extract last non-empty line from output as error detail.
+			errDetail := msg.err.Error()
+			if msg.output != "" {
+				lines := strings.Split(strings.TrimSpace(msg.output), "\n")
+				for i := len(lines) - 1; i >= 0; i-- {
+					if strings.TrimSpace(lines[i]) != "" {
+						errDetail = strings.TrimSpace(lines[i])
+						break
+					}
+				}
+			}
+			m.status = statusModel{
+				state:     taskError,
+				taskName:  msg.taskName,
+				message:   errDetail,
+				dismissAt: time.Now().Add(5 * time.Second),
+			}
+		} else {
+			m.status = statusModel{
+				state:     taskDone,
+				taskName:  msg.taskName,
+				dismissAt: time.Now().Add(5 * time.Second),
+			}
+			// Reload the index so newly enriched/embedded pages appear.
+			if m.kbDir != "" {
+				result, err := index.Load(context.Background(), m.kbDir, index.WithIgnoreErrors(true))
+				if err == nil {
+					m.idx = result.Index
+					m.search = newSearchModel(m.idx)
+					m.search.width = m.width
+					m.search.height = m.height
+				}
+			}
+		}
+		return m, dismissTick()
 
 	case tea.KeyMsg:
 		// Global quit keys.
@@ -130,19 +216,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateDocument(msg)
 	case viewExplore:
 		return m.updateExplore(msg)
+	case viewSettings:
+		return m.updateSettings(msg)
 	}
 
 	return m, nil
 }
-
-// homeMenuSearch is the menu index for Search.
-const homeMenuSearch = 0
-
-// homeMenuExplore is the menu index for Explore.
-const homeMenuExplore = 1
-
-// homeMenuSettings is the menu index for Settings / Reconfigure.
-const homeMenuSettings = 3
 
 func (m Model) updateHome(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
@@ -151,22 +230,46 @@ func (m Model) updateHome(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch m.home.SelectedIndex() {
 			case homeMenuSearch:
 				m.current = viewSearch
+				m.search.exploreMode = false
 				m.search.input.Focus()
 				return m, nil
 			case homeMenuExplore:
-				// Go to explore. If no page is loaded yet, go to search first
-				// so the user can pick one.
+				// Go to search with explore mode active.
 				m.current = viewSearch
+				m.search.exploreMode = true
 				m.search.input.Focus()
 				return m, nil
+			case homeMenuEnrich:
+				if m.taskRunning {
+					return m, nil
+				}
+				m.taskRunning = true
+				m.home.taskRunning = true
+				m.status = statusModel{
+					state:    taskRunning,
+					taskName: "Enrich",
+				}
+				return m, tea.Batch(
+					runBackgroundTask(m.kbDir, "Enrich", "markedup", "enrich"),
+					spinnerTick(),
+				)
+			case homeMenuEmbed:
+				if m.taskRunning {
+					return m, nil
+				}
+				m.taskRunning = true
+				m.home.taskRunning = true
+				m.status = statusModel{
+					state:    taskRunning,
+					taskName: "Embed",
+				}
+				return m, tea.Batch(
+					runBackgroundTask(m.kbDir, "Embed", "markedup", "embed"),
+					spinnerTick(),
+				)
 			case homeMenuSettings:
-				// Settings: exit and tell user to run `markedup setup`.
-				// We can't re-launch the setup wizard from within the TUI without
-				// a round-trip through the CLI, so we quit with a message.
-				// The message is surfaced via the CLI's exit flow.
-				return m, tea.Quit
-			default:
-				// Graph (placeholder) and any future items: no-op for now.
+				m.settings = newSettingsModel(m.cfg, m.width, m.height)
+				m.current = viewSettings
 				return m, nil
 			}
 		}
@@ -263,6 +366,17 @@ func (m Model) updateExplore(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m Model) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case "esc", "h":
+			m.current = viewHome
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
 // navigateToNode follows a link in the explore view.
 func (m *Model) navigateToNode(page *schema.Page) {
 	m.explore = newExploreModel(m.idx, page)
@@ -272,17 +386,55 @@ func (m *Model) navigateToNode(page *schema.Page) {
 
 // View implements tea.Model.
 func (m Model) View() string {
+	var content string
 	switch m.current {
 	case viewHome:
-		return m.home.View()
+		content = m.home.View()
 	case viewOnboarding:
-		return m.onboarding.View()
+		content = m.onboarding.View()
 	case viewSearch:
-		return m.search.View()
+		content = m.search.View()
 	case viewDocument:
-		return m.doc.View()
+		content = m.doc.View()
 	case viewExplore:
-		return m.explore.View()
+		content = m.explore.View()
+	case viewSettings:
+		content = m.settings.View()
 	}
-	return ""
+
+	// Append status bar if there is something to show.
+	statusLine := m.status.View(m.width)
+	if statusLine != "" {
+		return content + "\n" + statusLine
+	}
+	return content
+}
+
+// runBackgroundTask runs a subprocess to completion in a goroutine and returns
+// a taskDoneMsg when it finishes. The kbDir is appended as the last argument.
+func runBackgroundTask(kbDir, taskName, binary string, subArgs ...string) tea.Cmd {
+	return func() tea.Msg {
+		args := append(subArgs, kbDir)
+		cmd := exec.Command(binary, args...)
+		out, err := cmd.CombinedOutput()
+		return taskDoneMsg{
+			taskName: taskName,
+			err:      err,
+			output:   string(out),
+		}
+	}
+}
+
+// spinnerTick returns a Cmd that sends statusTickMsg after 200ms.
+func spinnerTick() tea.Cmd {
+	return tea.Tick(200*time.Millisecond, func(_ time.Time) tea.Msg {
+		return statusTickMsg{}
+	})
+}
+
+// dismissTick returns a Cmd that sends statusTickMsg after 1s (for auto-dismiss polling).
+func dismissTick() tea.Cmd {
+	return tea.Tick(1*time.Second, func(_ time.Time) tea.Msg {
+		return statusTickMsg{}
+	})
 }

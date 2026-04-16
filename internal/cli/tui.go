@@ -48,5 +48,5 @@ func runTUI(dir string) error {
 		return fmt.Errorf("failed to load %s: %w", dir, err)
 	}
 
-	return tui.Run(result.Index)
+	return tui.Run(result.Index, dir, appConfig)
 }

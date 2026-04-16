@@ -14,17 +14,19 @@ type menuItem struct {
 }
 
 var homeMenuItems = []menuItem{
-	{label: "Search", description: "Search the knowledge base"},
-	{label: "Explore", description: "Explore graph connections"},
-	{label: "Graph", description: "Graph overview (coming soon)"},
-	{label: "Settings / Reconfigure", description: "Reconfigure markedup"},
+	{label: "Search", description: "Search by keyword or semantic similarity"},
+	{label: "Explore", description: "Traverse graph connections from an entity"},
+	{label: "Enrich", description: "Auto-generate frontmatter for plain markdown files"},
+	{label: "Embed", description: "Generate vector embeddings for semantic search"},
+	{label: "Settings", description: "View config and reconfigure"},
 }
 
 // homeModel is the home/menu screen shown on TUI launch.
 type homeModel struct {
-	cursor int
-	width  int
-	height int
+	cursor      int
+	width       int
+	height      int
+	taskRunning bool // when true, Enrich and Embed are greyed out
 }
 
 func newHomeModel() homeModel {
@@ -67,17 +69,27 @@ func (m homeModel) View() string {
 	b.WriteString("\n\n")
 
 	for i, item := range homeMenuItems {
+		// Enrich (2) and Embed (3) are disabled while a task is running.
+		disabled := m.taskRunning && (i == homeMenuEnrich || i == homeMenuEmbed)
+
 		prefix := "  "
 		labelSty := lipgloss.NewStyle()
 		descSty := mutedStyle
 
-		if i == m.cursor {
+		switch {
+		case disabled:
+			labelSty = mutedStyle
+			descSty = mutedStyle
+		case i == m.cursor:
 			prefix = "> "
 			labelSty = selectedStyle
 			descSty = lipgloss.NewStyle().Foreground(colorSecondary)
 		}
 
 		line := prefix + item.label
+		if disabled {
+			line = "  " + item.label + " (running...)"
+		}
 		b.WriteString(labelSty.Render(line))
 		b.WriteString("  ")
 		b.WriteString(descSty.Render(item.description))

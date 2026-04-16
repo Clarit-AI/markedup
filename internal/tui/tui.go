@@ -7,18 +7,20 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
 
+	"github.com/KHAEntertainment/markedup/config"
 	"github.com/KHAEntertainment/markedup/index"
 )
 
-// Run launches the TUI with the given knowledge index. It returns an error
-// if stdout is not a terminal or if the TUI encounters a fatal error.
-// The TUI package has no dependency on cobra — it receives only the index.
-func Run(idx *index.KnowledgeIndex) error {
+// Run launches the TUI with the given knowledge index, KB directory, and config.
+// It returns an error if stdout is not a terminal or if the TUI encounters a
+// fatal error. The TUI package has no dependency on cobra — it receives only
+// the index, directory, and config.
+func Run(idx *index.KnowledgeIndex, kbDir string, cfg *config.Config) error {
 	if !isatty.IsTerminal(os.Stdout.Fd()) && !isatty.IsCygwinTerminal(os.Stdout.Fd()) {
 		return fmt.Errorf("TUI requires a terminal (stdout is not a TTY); use plain CLI commands instead")
 	}
 
-	model := NewModel(idx)
+	model := NewModel(idx, kbDir, cfg)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	_, err := p.Run()
