@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
 
@@ -37,9 +38,9 @@ func Run() (*config.Config, error) {
 	return wm.config, nil
 }
 
-// wizardModel is the root BubbleTea model for the 6-step setup wizard.
+// wizardModel is the root BubbleTea model for the 7-step setup wizard.
 type wizardModel struct {
-	step         int   // 0=welcome, 1=embed, 2=llm, 3=rerank, 4=keys, 5=confirm
+	step         int   // 0=welcome, 1=embed, 2=llm, 3=rerank, 4=triplex, 5=keys, 6=confirm
 	stepHistory  []int // stack of previous step indices for Esc back-navigation
 	config       *config.Config
 	detected     []config.Endpoint
@@ -52,23 +53,27 @@ type wizardModel struct {
 	embed    providerStep
 	llm      providerStep
 	rerank   providerStep
+	triplex  triplexStep
 	keys     keysStep
 	confirm  confirmStep
 
 	// Track which services need API keys.
-	needEmbedKey  bool
-	needLLMKey    bool
-	needRerankKey bool
+	needEmbedKey    bool
+	needLLMKey      bool
+	needRerankKey   bool
+	needTriplexKey  bool
 
 	// Track selected provider labels for key step labeling.
 	embedProviderLabel  string
 	llmProviderLabel    string
 	rerankProviderLabel string
+	triplexProviderLabel string
 
 	// Track selected provider endpoints for key deduplication.
-	embedEndpoint  string
-	llmEndpoint    string
-	rerankEndpoint string
+	embedEndpoint   string
+	llmEndpoint     string
+	rerankEndpoint  string
+	triplexEndpoint string
 }
 
 func newWizardModel() wizardModel {
@@ -116,8 +121,10 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case 3:
 		return m.updateRerank(msg)
 	case 4:
-		return m.updateKeys(msg)
+		return m.updateTriplex(msg)
 	case 5:
+		return m.updateKeys(msg)
+	case 6:
 		return m.updateConfirm(msg)
 	}
 
@@ -140,6 +147,7 @@ func (m wizardModel) handleEsc() (tea.Model, tea.Cmd) {
 		if m.rerank.phase > 0 {
 			return m, nil
 		}
+	// case 4 (triplex): no sub-phases, fall through to pop history
 	}
 
 	// Step 0 (welcome): Esc exits cleanly.
@@ -240,11 +248,37 @@ func (m wizardModel) updateRerank(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rerankProviderLabel = m.rerank.selectedProviderLabel()
 		m.stepHistory = append(m.stepHistory, m.step)
 
+		// Advance to Triplex step (step 4).
+		m.triplex = newTriplexStep(m.detected)
+		m.step = 4
+		return m, textinput.Blink
+	}
+
+	return m, cmd
+}
+
+func (m wizardModel) updateTriplex(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.triplex, cmd = m.triplex.Update(msg)
+
+	if m.triplex.done {
+		if !m.triplex.skip {
+			// Configured: store endpoint + model. Format is auto-set to "triplex"
+			// by the enrich pipeline based on the model name (FormatTriplex).
+			m.config.Triplex = m.triplex.selected
+			m.needTriplexKey = m.triplex.needsKey
+			m.triplexEndpoint = m.triplex.selected.Endpoint
+			m.triplexProviderLabel = "Triplex"
+		}
+		// When skipped: config.Triplex stays zero value, needTriplexKey = false.
+
+		m.stepHistory = append(m.stepHistory, m.step)
+
 		// Skip keys step if no cloud providers selected.
-		if !m.needEmbedKey && !m.needLLMKey && !m.needRerankKey {
+		if !m.needEmbedKey && !m.needLLMKey && !m.needRerankKey && !m.needTriplexKey {
 			m.keys = keysStep{done: true, collectedKeys: map[string]string{}}
 			m.confirm = newConfirmStep(m.config, m.rerank.formatVal, nil)
-			m.step = 5
+			m.step = 6
 			return m, nil
 		}
 
@@ -252,9 +286,10 @@ func (m wizardModel) updateRerank(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.needEmbedKey, m.embedProviderLabel, m.embedEndpoint,
 			m.needLLMKey, m.llmProviderLabel, m.llmEndpoint,
 			m.needRerankKey, m.rerankProviderLabel, m.rerankEndpoint,
+			m.needTriplexKey, m.triplexProviderLabel, m.triplexEndpoint,
 		)
 		m.stepHistory = append(m.stepHistory, m.step)
-		m.step = 4
+		m.step = 5
 		return m, m.keys.Init()
 	}
 
@@ -268,7 +303,7 @@ func (m wizardModel) updateKeys(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.keys.done {
 		m.confirm = newConfirmStep(m.config, m.rerank.formatVal, m.keys.collectedKeys)
 		m.stepHistory = append(m.stepHistory, m.step)
-		m.step = 5
+		m.step = 6
 		return m, nil
 	}
 
@@ -307,6 +342,9 @@ func (m wizardModel) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if k, ok := m.keys.collectedKeys["rerank"]; ok {
 					m.config.Rerank.APIKey = k
 				}
+				if k, ok := m.keys.collectedKeys["triplex"]; ok {
+					m.config.Triplex.APIKey = k
+				}
 
 				m.confirm.saved = true
 				return m, nil
@@ -327,7 +365,7 @@ func (m wizardModel) View() string {
 	}
 
 	// Step indicator.
-	steps := []string{"Welcome", "Embed", "LLM", "Rerank", "Keys", "Confirm"}
+	steps := []string{"Welcome", "Embed", "LLM", "Rerank", "Triplex", "Keys", "Confirm"}
 	stepLine := ""
 	for i, name := range steps {
 		if i == m.step {
@@ -353,8 +391,10 @@ func (m wizardModel) View() string {
 	case 3:
 		view += m.rerank.View(width)
 	case 4:
-		view += m.keys.View(width)
+		view += m.triplex.View(width)
 	case 5:
+		view += m.keys.View(width)
+	case 6:
 		view += m.confirm.View(width)
 	}
 
