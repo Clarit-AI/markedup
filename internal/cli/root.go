@@ -20,9 +20,10 @@ var (
 
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "markedup",
-		Short: "Knowledge graph toolkit for markdown files",
-		Long:  "markedup builds an in-memory knowledge graph from Obsidian-compatible markdown files with YAML frontmatter.",
+		Use:     "markedup",
+		Short:   "Knowledge graph toolkit for markdown files",
+		Long:    "markedup builds an in-memory knowledge graph from Obsidian-compatible markdown files with YAML frontmatter.",
+		Version: "0.1.0",
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			isTTY = isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
 			appConfig, _ = config.Load(".")

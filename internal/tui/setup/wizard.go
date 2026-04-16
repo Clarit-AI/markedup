@@ -39,12 +39,13 @@ func Run() (*config.Config, error) {
 
 // wizardModel is the root BubbleTea model for the 6-step setup wizard.
 type wizardModel struct {
-	step      int // 0=welcome, 1=embed, 2=llm, 3=rerank, 4=keys, 5=confirm
-	config    *config.Config
-	detected  []config.Endpoint
-	cancelled bool
-	width     int
-	height    int
+	step         int   // 0=welcome, 1=embed, 2=llm, 3=rerank, 4=keys, 5=confirm
+	stepHistory  []int // stack of previous step indices for Esc back-navigation
+	config       *config.Config
+	detected     []config.Endpoint
+	cancelled    bool
+	width        int
+	height       int
 
 	// Sub-models for each step.
 	welcome  welcomeStep
@@ -58,6 +59,16 @@ type wizardModel struct {
 	needEmbedKey  bool
 	needLLMKey    bool
 	needRerankKey bool
+
+	// Track selected provider labels for key step labeling.
+	embedProviderLabel  string
+	llmProviderLabel    string
+	rerankProviderLabel string
+
+	// Track selected provider endpoints for key deduplication.
+	embedEndpoint  string
+	llmEndpoint    string
+	rerankEndpoint string
 }
 
 func newWizardModel() wizardModel {
@@ -114,31 +125,36 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m wizardModel) handleEsc() (tea.Model, tea.Cmd) {
+	// If the current step sub-model has an active sub-phase, let it handle Esc
+	// internally (e.g. going from model-entry back to provider list).
 	switch m.step {
-	case 0:
-		m.cancelled = true
-		return m, tea.Quit
 	case 1:
-		// Check if the embed step is in a sub-phase. If so, let it handle esc.
 		if m.embed.phase > 0 {
 			return m, nil // will be handled by step update
 		}
-		m.step = 0
 	case 2:
 		if m.llm.phase > 0 {
 			return m, nil
 		}
-		m.step = 1
 	case 3:
 		if m.rerank.phase > 0 {
 			return m, nil
 		}
-		m.step = 2
-	case 4:
-		m.step = 3
-	case 5:
+	}
+
+	// Step 0 (welcome): Esc exits cleanly.
+	if m.step == 0 {
 		m.cancelled = true
 		return m, tea.Quit
+	}
+
+	// Pop the step history stack to go back to the previous step.
+	if len(m.stepHistory) > 0 {
+		m.step = m.stepHistory[len(m.stepHistory)-1]
+		m.stepHistory = m.stepHistory[:len(m.stepHistory)-1]
+	} else {
+		// Fallback: go back one step.
+		m.step--
 	}
 	return m, nil
 }
@@ -152,10 +168,11 @@ func (m wizardModel) updateWelcome(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "enter" && !m.welcome.detecting {
 		m.detected = m.welcome.detected
 		m.embed = newProviderStep(
-			"Embedding Provider",
-			"Choose an embedding endpoint for semantic search.",
+			"Choose a text embedding model",
+			"Converts text to vectors for similarity search\ne.g. nomic-embed-text (local), text-embedding-3-small (OpenAI)",
 			m.detected, "embed", false, false,
 		)
+		m.stepHistory = append(m.stepHistory, m.step)
 		m.step = 1
 		return m, nil
 	}
@@ -172,11 +189,14 @@ func (m wizardModel) updateEmbed(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.embed.done {
 		m.config.Embed = m.embed.selected
 		m.needEmbedKey = m.embed.needsKey
+		m.embedEndpoint = m.embed.selected.Endpoint
+		m.embedProviderLabel = m.embed.selectedProviderLabel()
 		m.llm = newProviderStep(
 			"LLM Provider",
-			"Choose an LLM endpoint for enrichment and reasoning.",
+			"Choose an LLM endpoint for enrichment and reasoning.\ne.g. granite-3.1-dense:2b (local), gpt-4o-mini (cloud)",
 			m.detected, "llm", false, false,
 		)
+		m.stepHistory = append(m.stepHistory, m.step)
 		m.step = 2
 		return m, nil
 	}
@@ -191,11 +211,14 @@ func (m wizardModel) updateLLM(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.llm.done {
 		m.config.LLM = m.llm.selected
 		m.needLLMKey = m.llm.needsKey
+		m.llmEndpoint = m.llm.selected.Endpoint
+		m.llmProviderLabel = m.llm.selectedProviderLabel()
 		m.rerank = newProviderStep(
 			"Reranker (optional)",
-			"Configure a reranker? Improves search quality by re-scoring results.",
+			"Configure a reranker model to improve search quality by re-scoring results.\ne.g. bge-reranker-v2-m3 (local TEI), jina-reranker-v2-base-multilingual (cloud)",
 			m.detected, "rerank", true, true,
 		)
+		m.stepHistory = append(m.stepHistory, m.step)
 		m.step = 3
 		return m, nil
 	}
@@ -213,6 +236,9 @@ func (m wizardModel) updateRerank(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Format:        m.rerank.formatVal,
 		}
 		m.needRerankKey = m.rerank.needsKey
+		m.rerankEndpoint = m.rerank.selected.Endpoint
+		m.rerankProviderLabel = m.rerank.selectedProviderLabel()
+		m.stepHistory = append(m.stepHistory, m.step)
 
 		// Skip keys step if no cloud providers selected.
 		if !m.needEmbedKey && !m.needLLMKey && !m.needRerankKey {
@@ -222,7 +248,12 @@ func (m wizardModel) updateRerank(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		m.keys = newKeysStep(m.needEmbedKey, m.needLLMKey, m.needRerankKey)
+		m.keys = newKeysStep(
+			m.needEmbedKey, m.embedProviderLabel, m.embedEndpoint,
+			m.needLLMKey, m.llmProviderLabel, m.llmEndpoint,
+			m.needRerankKey, m.rerankProviderLabel, m.rerankEndpoint,
+		)
+		m.stepHistory = append(m.stepHistory, m.step)
 		m.step = 4
 		return m, m.keys.Init()
 	}
@@ -236,6 +267,7 @@ func (m wizardModel) updateKeys(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.keys.done {
 		m.confirm = newConfirmStep(m.config, m.rerank.formatVal, m.keys.collectedKeys)
+		m.stepHistory = append(m.stepHistory, m.step)
 		m.step = 5
 		return m, nil
 	}
