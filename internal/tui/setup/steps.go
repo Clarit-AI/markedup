@@ -46,8 +46,21 @@ var cloudProviders = []providerChoice{
 	{label: "Ollama Cloud", endpoint: "https://api.ollama.com", kind: "cloud"},
 }
 
-// rerankFormats are the supported reranker request formats.
+// rerankFormats are the internal config values for reranker request formats.
+// These must NOT be changed — they are stored in config YAML.
 var rerankFormats = []string{"jina", "openai"}
+
+// rerankFormatLabels are the display labels for rerankFormats, parallel by index.
+var rerankFormatLabels = []string{
+	"Standard (/v1/rerank)",
+	"Score API (/v1/score)",
+}
+
+// rerankFormatHelper is shown below the format selector.
+const rerankFormatHelper = "Most cloud providers (Jina, Cohere via OpenRouter) use Standard."
+
+// embedModelNote is shown when auto-detected model list contains no known embedding models.
+const embedModelNote = "Note: select an embedding model (e.g. nomic-embed-text, all-minilm, bge-*). LLM models will not work here."
 
 // ---------------------------------------------------------------------------
 // Welcome + Detect step (step 0)
@@ -128,20 +141,38 @@ func (w welcomeStep) View(width int) string {
 // ---------------------------------------------------------------------------
 
 type providerStep struct {
-	title       string
-	description string
-	optional    bool // if true, shows "skip" first and is pre-selected
-	choices     []providerChoice
-	cursor      int
-	phase       int // 0=choosing provider, 1=entering endpoint, 2=entering model, 3=choosing format (rerank only)
-	endpointIn  textinput.Model
-	modelIn     textinput.Model
-	needsKey    bool   // true if a cloud provider was selected
-	formatIdx   int    // rerank format selector index
-	showFormat  bool   // whether to show format selection
-	selected    config.ServiceConfig
-	formatVal   string
-	done        bool
+	title         string
+	description   string
+	optional      bool // if true, shows "skip" first and is pre-selected
+	choices       []providerChoice
+	cursor        int
+	phase         int // 0=choosing provider, 1=entering endpoint, 2=entering model, 3=choosing format (rerank only)
+	endpointIn    textinput.Model
+	modelIn       textinput.Model
+	needsKey      bool   // true if a cloud provider was selected
+	formatIdx     int    // rerank format selector index
+	showFormat    bool   // whether to show format selection
+	selected      config.ServiceConfig
+	formatVal     string
+	done          bool
+	embedWarning  bool   // true if detected models look like LLM models, not embedding models
+}
+
+// selectedProviderLabel returns a human-readable label for the chosen provider,
+// used to label API key inputs.
+func (p providerStep) selectedProviderLabel() string {
+	if p.cursor < len(p.choices) {
+		c := p.choices[p.cursor]
+		switch c.kind {
+		case "detected":
+			return c.label
+		case "cloud":
+			return c.label
+		case "custom":
+			return "Custom"
+		}
+	}
+	return "API"
 }
 
 func newProviderStep(title, desc string, detected []config.Endpoint, filterType string, optional bool, showFormat bool) providerStep {
@@ -184,16 +215,47 @@ func newProviderStep(title, desc string, detected []config.Endpoint, filterType 
 		startCursor = len(choices) - 1
 	}
 
-	return providerStep{
-		title:       title,
-		description: desc,
-		optional:    optional,
-		choices:     choices,
-		cursor:      startCursor,
-		endpointIn:  ei,
-		modelIn:     mi,
-		showFormat:  showFormat,
+	// For the embed step, check whether the detected model lists appear to be
+	// LLM-named models rather than embedding models. If so, surface a warning.
+	embedWarning := false
+	if filterType == "embed" {
+		for _, c := range choices {
+			if c.kind == "detected" {
+				for _, m := range c.models {
+					if !looksLikeEmbedModel(m) {
+						embedWarning = true
+						break
+					}
+				}
+				if embedWarning {
+					break
+				}
+			}
+		}
 	}
+
+	return providerStep{
+		title:        title,
+		description:  desc,
+		optional:     optional,
+		choices:      choices,
+		cursor:       startCursor,
+		endpointIn:   ei,
+		modelIn:      mi,
+		showFormat:   showFormat,
+		embedWarning: embedWarning,
+	}
+}
+
+// looksLikeEmbedModel returns true if the model name contains patterns that
+// indicate it is an embedding model (rather than a generative LLM).
+func looksLikeEmbedModel(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "embed") ||
+		strings.Contains(lower, "minilm") ||
+		strings.Contains(lower, "bge") ||
+		strings.Contains(lower, "e5") ||
+		strings.Contains(lower, "nomic")
 }
 
 func (p providerStep) Update(msg tea.Msg) (providerStep, tea.Cmd) {
@@ -327,6 +389,11 @@ func (p providerStep) View(width int) string {
 
 	switch p.phase {
 	case 0:
+		// UX-01: Show a note when detected models appear to be LLM models.
+		if p.embedWarning {
+			b.WriteString(warningStyle.Render(embedModelNote))
+			b.WriteString("\n\n")
+		}
 		for i, c := range p.choices {
 			prefix := "  "
 			style := subtitleStyle
@@ -361,16 +428,19 @@ func (p providerStep) View(width int) string {
 		b.WriteString("\n\n")
 		b.WriteString(labelStyle.Render("Reranker format:"))
 		b.WriteString("\n")
-		for i, f := range rerankFormats {
+		// UX-11: Use display labels; internal values (rerankFormats) are unchanged.
+		for i, label := range rerankFormatLabels {
 			prefix := "  "
 			style := subtitleStyle
 			if i == p.formatIdx {
 				prefix = "> "
 				style = selectedStyle
 			}
-			b.WriteString(style.Render(prefix + f))
+			b.WriteString(style.Render(prefix + label))
 			b.WriteString("\n")
 		}
+		b.WriteString("\n")
+		b.WriteString(mutedStyle.Render(rerankFormatHelper))
 		b.WriteString("\n")
 		b.WriteString(helpStyle.Render("up/down: navigate  |  Enter: select  |  Esc: back  |  Ctrl+C: cancel"))
 	}
@@ -384,8 +454,10 @@ func (p providerStep) View(width int) string {
 
 // keyEntry represents one API key to collect.
 type keyEntry struct {
-	service string // "embed", "llm", "rerank"
-	label   string // display label
+	service   string   // "embed", "llm", "rerank"
+	label     string   // display label
+	endpoint  string   // provider endpoint, used for deduplication
+	services  []string // additional services sharing this key (for deduplication)
 }
 
 type keysStep struct {
@@ -397,16 +469,57 @@ type keysStep struct {
 	collectedKeys  map[string]string // service -> key value
 }
 
-func newKeysStep(needEmbed, needLLM, needRerank bool) keysStep {
-	var entries []keyEntry
+// newKeysStep builds the API key collection step. For each service that needs
+// a key, provide needX=true, providerLabelX (shown in the input label), and
+// endpointX (used to deduplicate — if two services share the same endpoint,
+// only one key input is shown and the key is applied to both services).
+func newKeysStep(
+	needEmbed bool, embedLabel, embedEndpoint string,
+	needLLM bool, llmLabel, llmEndpoint string,
+	needRerank bool, rerankLabel, rerankEndpoint string,
+) keysStep {
+	type svcInfo struct {
+		service  string
+		label    string
+		endpoint string
+	}
+
+	var candidates []svcInfo
 	if needEmbed {
-		entries = append(entries, keyEntry{service: "embed", label: "Embedding API Key"})
+		candidates = append(candidates, svcInfo{"embed", embedLabel, embedEndpoint})
 	}
 	if needLLM {
-		entries = append(entries, keyEntry{service: "llm", label: "LLM API Key"})
+		candidates = append(candidates, svcInfo{"llm", llmLabel, llmEndpoint})
 	}
 	if needRerank {
-		entries = append(entries, keyEntry{service: "rerank", label: "Reranker API Key"})
+		candidates = append(candidates, svcInfo{"rerank", rerankLabel, rerankEndpoint})
+	}
+
+	// Deduplicate by endpoint. The first service to claim an endpoint becomes
+	// the "primary" entry; subsequent services sharing that endpoint are added
+	// to its services list so the collected key is applied to all of them.
+	seen := map[string]int{} // endpoint -> entries index
+	var entries []keyEntry
+	for _, c := range candidates {
+		if idx, ok := seen[c.endpoint]; ok && c.endpoint != "" {
+			// Same endpoint already has an entry — add this service to it.
+			entries[idx].services = append(entries[idx].services, c.service)
+		} else {
+			// Build a label like "OpenRouter API Key".
+			displayLabel := c.label
+			if displayLabel == "" {
+				displayLabel = "API"
+			}
+			e := keyEntry{
+				service:  c.service,
+				label:    displayLabel + " API Key",
+				endpoint: c.endpoint,
+			}
+			if c.endpoint != "" {
+				seen[c.endpoint] = len(entries)
+			}
+			entries = append(entries, e)
+		}
 	}
 
 	inputs := make([]textinput.Model, len(entries))
@@ -449,7 +562,12 @@ func (k keysStep) Update(msg tea.Msg) (keysStep, tea.Cmd) {
 		case "enter":
 			val := strings.TrimSpace(k.inputs[k.cursor].Value())
 			if val != "" {
-				k.collectedKeys[k.entries[k.cursor].service] = val
+				entry := k.entries[k.cursor]
+				k.collectedKeys[entry.service] = val
+				// UX-12b: Apply the same key to all services sharing this endpoint.
+				for _, svc := range entry.services {
+					k.collectedKeys[svc] = val
+				}
 			}
 			if k.cursor < len(k.entries)-1 {
 				k.inputs[k.cursor].Blur()
@@ -463,7 +581,11 @@ func (k keysStep) Update(msg tea.Msg) (keysStep, tea.Cmd) {
 			if k.cursor < len(k.entries)-1 {
 				val := strings.TrimSpace(k.inputs[k.cursor].Value())
 				if val != "" {
-					k.collectedKeys[k.entries[k.cursor].service] = val
+					entry := k.entries[k.cursor]
+					k.collectedKeys[entry.service] = val
+					for _, svc := range entry.services {
+						k.collectedKeys[svc] = val
+					}
 				}
 				k.inputs[k.cursor].Blur()
 				k.cursor++
@@ -547,7 +669,8 @@ func (c confirmStep) View(width int) string {
 	b.WriteString(labelStyle.Render("Embedding:"))
 	b.WriteString("\n")
 	if c.cfg.Embed.Endpoint != "" {
-		b.WriteString(fmt.Sprintf("  Endpoint: %s\n", c.cfg.Embed.Endpoint))
+		// UX-10: show effective URL with known path suffix for display only.
+		b.WriteString(fmt.Sprintf("  URL:      %s\n", c.cfg.Embed.Endpoint+"/v1/embeddings"))
 		b.WriteString(fmt.Sprintf("  Model:    %s\n", c.cfg.Embed.Model))
 	} else {
 		b.WriteString(mutedStyle.Render("  (not configured)"))
@@ -558,7 +681,7 @@ func (c confirmStep) View(width int) string {
 	b.WriteString(labelStyle.Render("LLM:"))
 	b.WriteString("\n")
 	if c.cfg.LLM.Endpoint != "" {
-		b.WriteString(fmt.Sprintf("  Endpoint: %s\n", c.cfg.LLM.Endpoint))
+		b.WriteString(fmt.Sprintf("  URL:      %s\n", c.cfg.LLM.Endpoint+"/v1/chat/completions"))
 		b.WriteString(fmt.Sprintf("  Model:    %s\n", c.cfg.LLM.Model))
 	} else {
 		b.WriteString(mutedStyle.Render("  (not configured)"))
@@ -569,7 +692,7 @@ func (c confirmStep) View(width int) string {
 	b.WriteString(labelStyle.Render("Reranker:"))
 	b.WriteString("\n")
 	if c.cfg.Rerank.Endpoint != "" {
-		b.WriteString(fmt.Sprintf("  Endpoint: %s\n", c.cfg.Rerank.Endpoint))
+		b.WriteString(fmt.Sprintf("  URL:      %s\n", c.cfg.Rerank.Endpoint+"/v1/rerank"))
 		b.WriteString(fmt.Sprintf("  Model:    %s\n", c.cfg.Rerank.Model))
 		if c.format != "" {
 			b.WriteString(fmt.Sprintf("  Format:   %s\n", c.format))
@@ -599,7 +722,8 @@ func (c confirmStep) View(width int) string {
 		b.WriteString("\n")
 	} else {
 		b.WriteString(fmt.Sprintf("Save to %s?\n\n", config.GlobalPath()))
-		b.WriteString(helpStyle.Render("Enter: save  |  Esc: cancel  |  Ctrl+C: cancel"))
+		// UX-13: Show "Press Enter to save and continue" hint.
+		b.WriteString(helpStyle.Render("Press Enter to save and continue  |  Esc: cancel  |  Ctrl+C: cancel"))
 	}
 
 	return b.String()

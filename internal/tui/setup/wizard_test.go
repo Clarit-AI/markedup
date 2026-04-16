@@ -194,13 +194,13 @@ func TestProviderStep_RerankFormat(t *testing.T) {
 }
 
 func TestKeysStep_NoKeys(t *testing.T) {
-	ks := newKeysStep(false, false, false)
+	ks := newKeysStep(false, "", "", false, "", "", false, "", "")
 	ks, _ = ks.Update(nil)
 	assert.True(t, ks.done)
 }
 
 func TestKeysStep_WithKeys(t *testing.T) {
-	ks := newKeysStep(true, false, false)
+	ks := newKeysStep(true, "Ollama", "http://localhost:11434", false, "", "", false, "", "")
 	assert.Len(t, ks.entries, 1)
 	assert.Equal(t, "embed", ks.entries[0].service)
 }
@@ -295,7 +295,7 @@ func TestWizardModel_View_AllSteps(t *testing.T) {
 		case 3:
 			m.rerank = newProviderStep("Rerank", "", nil, "rerank", true, true)
 		case 4:
-			m.keys = newKeysStep(true, false, false)
+			m.keys = newKeysStep(true, "Ollama", "http://localhost:11434", false, "", "", false, "", "")
 		case 5:
 			m.confirm = newConfirmStep(m.config, "", nil)
 		}

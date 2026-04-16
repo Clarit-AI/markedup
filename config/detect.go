@@ -170,6 +170,14 @@ func detectLocalWithProbes(ctx context.Context, probes []probeSpec) []Endpoint {
 		g.Go(func() error {
 			ep := probeEndpoint(gctx, p)
 			if ep != nil {
+				// Skip services that expose a models API and returned an explicitly
+				// empty list ([]string{}) — e.g. LM Studio or Ollama with nothing
+				// loaded. Surfacing an endpoint with no available models is confusing.
+				// Note: nil models (parse failure) are not filtered so the endpoint
+				// is still surfaced as healthy.
+				if p.ParseModels != nil && ep.Models != nil && len(ep.Models) == 0 {
+					return nil
+				}
 				mu.Lock()
 				results = append(results, *ep)
 				mu.Unlock()
