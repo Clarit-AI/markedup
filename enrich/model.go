@@ -15,8 +15,9 @@ import (
 type ModelFormat int
 
 const (
-	FormatGeneric ModelFormat = iota // default: generic chat completion
-	FormatTriplex                    // Triplex NER fine-tune format
+	FormatGeneric   ModelFormat = iota // default: generic chat completion
+	FormatTriplex                      // Triplex NER fine-tune format
+	FormatNuExtract                    // NuExtract-2.0 template-based extraction
 )
 
 // DefaultEntityTypes are the entity types used when none are specified.
@@ -36,6 +37,20 @@ type ModelConfig struct {
 	APIKey     string       // Optional API key for authentication
 	HTTPClient *http.Client // Optional; defaults to http.DefaultClient
 	Format     ModelFormat  // zero value = FormatGeneric, no breaking change
+	NuExtract  NuExtractOptions
+}
+
+// NuExtractOptions configures the NuExtract-2.0 extractor.
+// Mode: "parallel" (default) fires entities and relations in parallel; "single"
+// sends one combined template.
+// Transport: "native" uses chat_template_kwargs at the request root for
+// vLLM/HF endpoints; "manual" renders the prompt client-side for GGUF runtimes
+// (llama.cpp, LM Studio, Ollama). Empty auto-detects from the endpoint URL.
+type NuExtractOptions struct {
+	Mode        string
+	Transport   string
+	Predicates  []string // overrides Extract's predicates arg when set
+	EntityTypes []string // overrides Extract's entityTypes arg when set
 }
 
 // ModelExtractor calls a chat-completion API to extract structured knowledge.
@@ -73,6 +88,10 @@ func (m *ModelExtractor) Extract(ctx context.Context, body string, entityTypes, 
 	}
 	if len(predicates) == 0 {
 		predicates = DefaultPredicates
+	}
+
+	if m.cfg.Format == FormatNuExtract {
+		return m.runNuExtract(ctx, entityTypes, predicates, body)
 	}
 
 	if m.cfg.Format == FormatTriplex {
