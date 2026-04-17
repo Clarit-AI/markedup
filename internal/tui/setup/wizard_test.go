@@ -413,7 +413,8 @@ func TestTriplexStep_CursorNavigation(t *testing.T) {
 func TestTriplexStep_View(t *testing.T) {
 	ts := newTriplexStep(nil)
 	view := ts.View(80)
-	assert.Contains(t, view, "Triple Extraction (Triplex)")
+	assert.Contains(t, view, "Structured Extractor")
+	assert.Contains(t, view, "NuExtract-2.0")
 	assert.Contains(t, view, "Model:")
 	assert.Contains(t, view, triplexModelName, "editable model input should show default")
 	assert.Contains(t, view, "Skip")
@@ -592,4 +593,41 @@ func TestProviderStep_CursorBounds(t *testing.T) {
 		ps, _ = ps.Update(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	assert.Equal(t, len(ps.choices)-1, ps.cursor)
+}
+
+func TestWizard_TriplexModel_WritesToTriplexConfig(t *testing.T) {
+	m := NewWizardModel()
+	m.triplex = triplexStep{
+		selected: config.ServiceConfig{
+			Endpoint: "http://localhost:11434",
+			Model:    "Phi-3-mini-128k-instruct/triplex",
+		},
+		done: true,
+	}
+	m.step = 4
+	updated, _ := m.updateTriplex(tea.KeyMsg{})
+	final, ok := updated.(WizardModel)
+	require.True(t, ok)
+	assert.Equal(t, "http://localhost:11434", final.config.Triplex.Endpoint)
+	assert.Empty(t, final.config.NuExtract.Endpoint, "Triplex model should not populate NuExtract config")
+	assert.Empty(t, final.config.Format, "Triplex model should not set Format explicitly")
+}
+
+func TestWizard_NuExtractModel_WritesToNuExtractConfig(t *testing.T) {
+	m := NewWizardModel()
+	m.triplex = triplexStep{
+		selected: config.ServiceConfig{
+			Endpoint: "https://xyz.hf.space",
+			Model:    "numind/NuExtract-2.0-8B",
+		},
+		done: true,
+	}
+	m.step = 4
+	updated, _ := m.updateTriplex(tea.KeyMsg{})
+	final, ok := updated.(WizardModel)
+	require.True(t, ok)
+	assert.Equal(t, "https://xyz.hf.space", final.config.NuExtract.Endpoint)
+	assert.Equal(t, "numind/NuExtract-2.0-8B", final.config.NuExtract.Model)
+	assert.Equal(t, "nuextract", final.config.Format)
+	assert.Empty(t, final.config.Triplex.Endpoint, "NuExtract model should not populate Triplex config")
 }

@@ -300,14 +300,24 @@ func (m WizardModel) updateTriplex(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.triplex.done {
 		if !m.triplex.skip {
-			// Configured: store endpoint + model. Format is auto-set to "triplex"
-			// by the enrich pipeline based on the model name (FormatTriplex).
-			m.config.Triplex = m.triplex.selected
+			// Route config based on the model id the user entered.
+			// NuExtract-2.0 family → config.NuExtract + Format="nuextract".
+			// Anything else → config.Triplex (backward compat).
+			if config.IsNuExtractModel(m.triplex.selected.Model) {
+				m.config.NuExtract = config.NuExtractConfig{
+					ServiceConfig: m.triplex.selected,
+					// Transport and Mode left empty → enrich defaults (parallel, auto transport).
+				}
+				m.config.Format = "nuextract"
+				m.triplexProviderLabel = "NuExtract-2.0"
+			} else {
+				m.config.Triplex = m.triplex.selected
+				m.triplexProviderLabel = "Triplex"
+			}
 			m.needTriplexKey = m.triplex.needsKey
 			m.triplexEndpoint = m.triplex.selected.Endpoint
-			m.triplexProviderLabel = "Triplex"
 		}
-		// When skipped: config.Triplex stays zero value, needTriplexKey = false.
+		// When skipped: config.Triplex/NuExtract stay zero, needTriplexKey = false.
 
 		m.stepHistory = append(m.stepHistory, m.step)
 
