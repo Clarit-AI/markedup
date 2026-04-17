@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 
@@ -66,15 +67,52 @@ func (m *ModelExtractor) runNuExtract(ctx context.Context, entityTypes, predicat
 
 // autodetectTransport picks "native" for cloud URLs and "manual" for
 // localhost / private-network endpoints where GGUF runtimes typically live.
+// Matches RFC1918 IPv4 ranges, IPv6 loopback, 0.0.0.0, and .local/.lan/.home
+// DNS suffixes. Err on the side of "manual" — a false positive on a
+// GGUF-local endpoint would send unsupported chat_template_kwargs.
 func autodetectTransport(endpoint string) string {
-	lower := strings.ToLower(endpoint)
-	if strings.Contains(lower, "localhost") ||
-		strings.Contains(lower, "127.0.0.1") ||
-		strings.Contains(lower, "192.168.") ||
-		strings.Contains(lower, "10.0.") {
+	host := hostFromEndpoint(endpoint)
+	if host == "" {
+		return "native"
+	}
+	lower := strings.ToLower(host)
+
+	if lower == "localhost" || lower == "127.0.0.1" || lower == "0.0.0.0" ||
+		lower == "::1" {
 		return "manual"
 	}
+	for _, suffix := range []string{".local", ".lan", ".home", ".internal"} {
+		if strings.HasSuffix(lower, suffix) {
+			return "manual"
+		}
+	}
+	if ip := net.ParseIP(lower); ip != nil {
+		if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			return "manual"
+		}
+	}
 	return "native"
+}
+
+// hostFromEndpoint extracts the hostname from a URL-like endpoint, stripping
+// scheme, path, port, and IPv6 brackets. Falls back to the raw string.
+func hostFromEndpoint(endpoint string) string {
+	s := strings.TrimSpace(endpoint)
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i]
+	}
+	if strings.HasPrefix(s, "[") {
+		if end := strings.Index(s, "]"); end >= 0 {
+			return s[1:end]
+		}
+	}
+	if strings.Count(s, ":") == 1 {
+		s = strings.SplitN(s, ":", 2)[0]
+	}
+	return s
 }
 
 func buildNuExtractEntitiesTemplate(entityTypes []string) string {
@@ -311,7 +349,7 @@ func dedupEntities(in []schema.Entity) []schema.Entity {
 	seen := map[string]bool{}
 	out := make([]schema.Entity, 0, len(in))
 	for _, e := range in {
-		k := strings.ToLower(e.Name)
+		k := strings.ToLower(e.Name) + "|" + strings.ToLower(e.Role)
 		if seen[k] {
 			continue
 		}

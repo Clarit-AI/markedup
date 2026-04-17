@@ -243,14 +243,76 @@ func TestNuExtract_Dedup(t *testing.T) {
 
 func TestAutodetectTransport(t *testing.T) {
 	cases := map[string]string{
-		"http://localhost:1234":      "manual",
-		"http://127.0.0.1:8080":      "manual",
-		"http://192.168.1.5:11434":   "manual",
+		// loopback / localhost
+		"http://localhost:1234": "manual",
+		"http://127.0.0.1:8080": "manual",
+		"http://0.0.0.0:8080":   "manual",
+		"http://[::1]:8080":     "manual",
+		"http://[::1]":          "manual",
+		// RFC1918 — all private ranges
+		"http://192.168.1.5:11434": "manual",
+		"http://10.0.1.5:8080":     "manual",
+		"http://10.1.2.3:8080":     "manual",
+		"http://10.42.0.1:8080":    "manual",
+		"http://172.16.0.5:8080":   "manual",
+		"http://172.31.255.254":    "manual",
+		// link-local
+		"http://169.254.1.1:8080": "manual",
+		// local DNS
+		"http://ollama.local:11434": "manual",
+		"http://radxa.lan:8081":     "manual",
+		"http://server.home/v1":     "manual",
+		"http://gpu.internal/v1":    "manual",
+		// public / cloud
 		"https://api.openai.com/v1":  "native",
 		"https://xyz.hf.space":       "native",
 		"https://inference.endpoint": "native",
+		"https://my-endpoint.us-east-1.aws.endpoints.huggingface.cloud/v1": "native",
+		// 172.32 is NOT in the private range
+		"http://172.32.0.1:8080": "native",
 	}
 	for url, want := range cases {
 		assert.Equal(t, want, autodetectTransport(url), "url=%s", url)
 	}
+}
+
+func TestDedupEntities_DifferentRolesPreserved(t *testing.T) {
+	raw := []nuextractEntity{
+		{Name: "Apple", Type: "ORGANIZATION"},
+		{Name: "Apple", Type: "PRODUCT"},
+		{Name: "apple", Type: "ORGANIZATION"},
+	}
+	entities, _, err := entitiesFromRaw(raw)
+	require.NoError(t, err)
+	out := dedupEntities(entities)
+	require.Len(t, out, 2)
+	roles := []string{out[0].Role, out[1].Role}
+	assert.Contains(t, roles, "ORGANIZATION")
+	assert.Contains(t, roles, "PRODUCT")
+}
+
+func TestNuExtract_DefaultsApplied_WhenExtractCalledWithNil(t *testing.T) {
+	var capturedTemplate string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+		if kw, ok := parsed["chat_template_kwargs"].(map[string]any); ok {
+			capturedTemplate, _ = kw["template"].(string)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(wrapChatCompletion(`{"entities":[]}`)))
+	}))
+	defer srv.Close()
+
+	m := NewModelExtractor(ModelConfig{
+		Endpoint:  srv.URL,
+		Model:     "numind/NuExtract-2.0-2B",
+		Format:    FormatNuExtract,
+		NuExtract: NuExtractOptions{Mode: "single", Transport: "native"},
+	})
+	_, err := m.Extract(context.Background(), "b", nil, nil)
+	require.NoError(t, err)
+	assert.Contains(t, capturedTemplate, "ORGANIZATION")
+	assert.Contains(t, capturedTemplate, "PERSON")
 }

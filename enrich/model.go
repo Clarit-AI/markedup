@@ -83,15 +83,17 @@ type ModelResult struct {
 // Extract sends the document body to the model and returns enriched fields.
 // entityTypes and predicates constrain the extraction. If nil, defaults are used.
 func (m *ModelExtractor) Extract(ctx context.Context, body string, entityTypes, predicates []string) (*ModelResult, error) {
+	if m.cfg.Format == FormatNuExtract {
+		// NuExtract has its own uppercased defaults; let runNuExtract apply them
+		// so caller-supplied zero-values don't get preempted by FormatGeneric defaults.
+		return m.runNuExtract(ctx, entityTypes, predicates, body)
+	}
+
 	if len(entityTypes) == 0 {
 		entityTypes = DefaultEntityTypes
 	}
 	if len(predicates) == 0 {
 		predicates = DefaultPredicates
-	}
-
-	if m.cfg.Format == FormatNuExtract {
-		return m.runNuExtract(ctx, entityTypes, predicates, body)
 	}
 
 	if m.cfg.Format == FormatTriplex {
