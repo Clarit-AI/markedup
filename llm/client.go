@@ -41,9 +41,41 @@ type Message struct {
 }
 
 // Request is the OpenAI-compatible chat completion request.
+// ExtraBody is merged into the root of the marshalled JSON body. Collisions
+// with core fields (Model/Messages) are ignored — core fields always win.
+// Used for non-standard extensions like vLLM's chat_template_kwargs.
 type Request struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
+	Model    string         `json:"model"`
+	Messages []Message      `json:"messages"`
+	Extra    map[string]any `json:"-"`
+}
+
+// marshalRequest marshals a Request to JSON. When Extra is empty, the output
+// is byte-identical to json.Marshal(r). Otherwise Extra keys are merged at the
+// root of the body; keys that collide with core struct fields are dropped.
+func marshalRequest(r Request) ([]byte, error) {
+	if len(r.Extra) == 0 {
+		return json.Marshal(r)
+	}
+	core, err := json.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(core, &root); err != nil {
+		return nil, err
+	}
+	for k, v := range r.Extra {
+		if _, exists := root[k]; exists {
+			continue
+		}
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return nil, fmt.Errorf("llm: marshal extra field %q: %w", k, err)
+		}
+		root[k] = raw
+	}
+	return json.Marshal(root)
 }
 
 // Response is the OpenAI-compatible chat completion response.
@@ -58,28 +90,34 @@ type Choice struct {
 
 // ChatCompletion sends a chat completion request and returns the first choice's content.
 func (c *Client) ChatCompletion(ctx context.Context, messages []Message) (string, error) {
-	reqBody := Request{
-		Model:    c.cfg.Model,
-		Messages: messages,
+	return c.ChatCompletionWith(ctx, Request{Messages: messages})
+}
+
+// ChatCompletionWith sends a chat completion request with an explicit Request,
+// allowing callers to set Extra fields (e.g. chat_template_kwargs for NuExtract
+// on vLLM/HF). Model is taken from the client Config unless overridden on req.
+func (c *Client) ChatCompletionWith(ctx context.Context, req Request) (string, error) {
+	if req.Model == "" {
+		req.Model = c.cfg.Model
 	}
 
-	jsonBody, err := json.Marshal(reqBody)
+	jsonBody, err := marshalRequest(req)
 	if err != nil {
 		return "", fmt.Errorf("llm: marshal request: %w", err)
 	}
 
 	endpoint := strings.TrimRight(c.cfg.Endpoint, "/") + "/v1/chat/completions"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(jsonBody))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(jsonBody))
 	if err != nil {
 		return "", fmt.Errorf("llm: create request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", "application/json")
 	if c.cfg.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+		httpReq.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("llm: request failed: %w", err)
 	}

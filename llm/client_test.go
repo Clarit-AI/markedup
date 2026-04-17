@@ -143,6 +143,63 @@ func TestClient_EndpointTrailingSlash(t *testing.T) {
 	assert.Equal(t, "ok", result)
 }
 
+func TestClient_ExtraBody_MergedAtRoot(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		resp := Response{Choices: []Choice{{Message: Message{Role: "assistant", Content: "ok"}}}}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{Endpoint: server.URL, Model: "numind/NuExtract-2.0-8B"})
+
+	_, err := client.ChatCompletionWith(context.Background(), Request{
+		Messages: []Message{{Role: "user", Content: "hi"}},
+		Extra: map[string]any{
+			"chat_template_kwargs": map[string]any{"template": `{"x":"verbatim-string"}`},
+			"temperature":          0,
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "numind/NuExtract-2.0-8B", capturedBody["model"])
+	assert.NotNil(t, capturedBody["messages"])
+	kw, ok := capturedBody["chat_template_kwargs"].(map[string]any)
+	require.True(t, ok, "chat_template_kwargs should be at root")
+	assert.Equal(t, `{"x":"verbatim-string"}`, kw["template"])
+	assert.Equal(t, float64(0), capturedBody["temperature"])
+}
+
+func TestClient_ExtraBody_CoreFieldsWin(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		resp := Response{Choices: []Choice{{Message: Message{Role: "assistant", Content: "ok"}}}}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{Endpoint: server.URL, Model: "real-model"})
+	_, err := client.ChatCompletionWith(context.Background(), Request{
+		Messages: []Message{{Role: "user", Content: "hi"}},
+		Extra:    map[string]any{"model": "evil-override"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "real-model", capturedBody["model"])
+}
+
+func TestMarshalRequest_EmptyExtraIsIdentical(t *testing.T) {
+	req := Request{Model: "m", Messages: []Message{{Role: "user", Content: "hi"}}}
+	plain, err := json.Marshal(req)
+	require.NoError(t, err)
+	merged, err := marshalRequest(req)
+	require.NoError(t, err)
+	assert.Equal(t, plain, merged)
+}
+
 func TestClient_ContextCancellation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// This handler will never respond in time.
