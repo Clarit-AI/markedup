@@ -390,3 +390,37 @@ func TestLlamaCppHealthOkInBody(t *testing.T) {
 	assert.True(t, eps[0].Healthy)
 	assert.Equal(t, []string{"test-model"}, eps[0].Models)
 }
+
+func TestIsNuExtractModel(t *testing.T) {
+	cases := map[string]bool{
+		"numind/NuExtract-2.0-8B":      true,
+		"numind/nuextract-2.0-2b":      true,
+		"NuExtract-2.0-4B":             true,
+		"nuextract-2.0-8B-GGUF":        true,
+		"triplex":                      false,
+		"llama3.1":                     false,
+		"numind/NuExtract-1.5":         false,
+		"":                             false,
+	}
+	for id, want := range cases {
+		assert.Equal(t, want, IsNuExtractModel(id), "id=%q", id)
+	}
+}
+
+func TestDetectLocal_NuExtractFormatTagged(t *testing.T) {
+	srv := newOpenAIModelsServer(t, []string{"numind/NuExtract-2.0-8B"})
+	defer srv.Close()
+
+	probes := []probeSpec{{
+		Name:         "LM Studio",
+		Port:         testServerPort(t, srv),
+		ProbePath:    "/v1/models",
+		SuccessCheck: func(code int, _ []byte) bool { return code == http.StatusOK },
+		Type:         "multi",
+		ParseModels:  parseOpenAIModels,
+	}}
+
+	eps := detectLocalWithProbes(context.Background(), probes)
+	require.Len(t, eps, 1)
+	assert.Contains(t, eps[0].Formats, "nuextract")
+}

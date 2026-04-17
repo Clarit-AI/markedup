@@ -97,7 +97,36 @@ func mergeConfigs(base, override *Config) *Config {
 	out.LLM = mergeService(base.LLM, override.LLM)
 	out.Triplex = mergeService(base.Triplex, override.Triplex)
 	out.Rerank = mergeRerank(base.Rerank, override.Rerank)
+	out.NuExtract = mergeNuExtract(base.NuExtract, override.NuExtract)
 
+	out.Format = base.Format
+	if override.Format != "" {
+		out.Format = override.Format
+	}
+
+	return out
+}
+
+func mergeNuExtract(base, override NuExtractConfig) NuExtractConfig {
+	out := NuExtractConfig{
+		ServiceConfig: mergeService(base.ServiceConfig, override.ServiceConfig),
+		Mode:          base.Mode,
+		Transport:     base.Transport,
+		Predicates:    base.Predicates,
+		EntityTypes:   base.EntityTypes,
+	}
+	if override.Mode != "" {
+		out.Mode = override.Mode
+	}
+	if override.Transport != "" {
+		out.Transport = override.Transport
+	}
+	if len(override.Predicates) > 0 {
+		out.Predicates = override.Predicates
+	}
+	if len(override.EntityTypes) > 0 {
+		out.EntityTypes = override.EntityTypes
+	}
 	return out
 }
 
@@ -141,6 +170,18 @@ func applyEnvOverrides(cfg *Config) {
 	setFromEnv(&cfg.LLM.Endpoint, "MARKEDUP_LLM_ENDPOINT")
 	setFromEnv(&cfg.LLM.Model, "MARKEDUP_LLM_MODEL")
 	setFromEnv(&cfg.LLM.APIKey, "MARKEDUP_LLM_API_KEY")
+
+	setFromEnv(&cfg.Triplex.Endpoint, "MARKEDUP_TRIPLEX_ENDPOINT")
+	setFromEnv(&cfg.Triplex.Model, "MARKEDUP_TRIPLEX_MODEL")
+	setFromEnv(&cfg.Triplex.APIKey, "MARKEDUP_TRIPLEX_API_KEY")
+
+	setFromEnv(&cfg.NuExtract.Endpoint, "MARKEDUP_NUEXTRACT_ENDPOINT")
+	setFromEnv(&cfg.NuExtract.Model, "MARKEDUP_NUEXTRACT_MODEL")
+	setFromEnv(&cfg.NuExtract.APIKey, "MARKEDUP_NUEXTRACT_API_KEY")
+	setFromEnv(&cfg.NuExtract.Mode, "MARKEDUP_NUEXTRACT_MODE")
+	setFromEnv(&cfg.NuExtract.Transport, "MARKEDUP_NUEXTRACT_TRANSPORT")
+
+	setFromEnv(&cfg.Format, "MARKEDUP_FORMAT")
 }
 
 func setFromEnv(target *string, envKey string) {
