@@ -23,6 +23,24 @@ type Endpoint struct {
 	Type    string   // "embed", "llm", "rerank", "multi"
 	Healthy bool
 	Models  []string // populated when the service exposes a models API
+	// Formats lists Tier 2 extractors this endpoint can serve (e.g. "nuextract"
+	// when a NuExtract-2.0 model id is present in Models).
+	Formats []string
+}
+
+// IsNuExtractModel reports whether a model id names a NuExtract-2.0 model.
+// Matches the canonical form `nuextract-2.0-*` (anchored on the trailing dash)
+// with any `publisher/` prefix stripped. Case-insensitive.
+// Examples matched: "nuextract-2.0-8b", "numind/NuExtract-2.0-2B",
+// "someorg/nuextract-2.0-4b-gguf".
+// Examples rejected: "nuextract-2.0", "nuextract-2.0foo", "nuextract-1.5-*",
+// "nuextract2.0-8b".
+func IsNuExtractModel(id string) bool {
+	lower := strings.ToLower(id)
+	if i := strings.LastIndex(lower, "/"); i >= 0 {
+		lower = lower[i+1:]
+	}
+	return strings.HasPrefix(lower, "nuextract-2.0-")
 }
 
 // probeSpec defines how to detect a single local service.
@@ -231,6 +249,13 @@ func probeEndpoint(ctx context.Context, p probeSpec) *Endpoint {
 			}
 		}
 		ep.Models = p.ParseModels(modelsBody)
+	}
+
+	for _, m := range ep.Models {
+		if IsNuExtractModel(m) {
+			ep.Formats = append(ep.Formats, "nuextract")
+			break
+		}
 	}
 
 	return ep
