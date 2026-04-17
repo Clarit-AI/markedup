@@ -670,7 +670,8 @@ func newKeysStep(
 	needEmbed bool, embedLabel, embedEndpoint string,
 	needLLM bool, llmLabel, llmEndpoint string,
 	needRerank bool, rerankLabel, rerankEndpoint string,
-	needTriplex bool, triplexLabel, triplexEndpoint string,
+	needExtractor bool, extractorLabel, extractorEndpoint string,
+	extractorService string, // "triplex" or "nuextract" — keyring + collectedKeys service name
 ) keysStep {
 	type svcInfo struct {
 		service  string
@@ -688,8 +689,12 @@ func newKeysStep(
 	if needRerank {
 		candidates = append(candidates, svcInfo{"rerank", rerankLabel, rerankEndpoint})
 	}
-	if needTriplex {
-		candidates = append(candidates, svcInfo{"triplex", triplexLabel, triplexEndpoint})
+	if needExtractor {
+		svc := extractorService
+		if svc == "" {
+			svc = "triplex"
+		}
+		candidates = append(candidates, svcInfo{svc, extractorLabel, extractorEndpoint})
 	}
 
 	// Deduplicate by endpoint. The first service to claim an endpoint becomes

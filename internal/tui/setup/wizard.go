@@ -68,6 +68,9 @@ type WizardModel struct {
 	llmProviderLabel    string
 	rerankProviderLabel string
 	triplexProviderLabel string
+	// extractorService is the keyring service name for the selected extractor:
+	// "triplex" or "nuextract". Empty when extractor is skipped.
+	extractorService string
 
 	// Track selected provider endpoints for key deduplication.
 	embedEndpoint   string
@@ -299,6 +302,13 @@ func (m WizardModel) updateTriplex(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.triplex, cmd = m.triplex.Update(msg)
 
 	if m.triplex.done {
+		// Always clear BOTH extractor blocks first so switching between
+		// extractor types (or re-running the wizard over an existing config)
+		// cannot leave stale state. Explicitly reset Format.
+		m.config.Triplex = config.ServiceConfig{}
+		m.config.NuExtract = config.NuExtractConfig{}
+		m.config.Format = ""
+
 		if !m.triplex.skip {
 			// Route config based on the model id the user entered.
 			// NuExtract-2.0 family → config.NuExtract + Format="nuextract".
@@ -310,14 +320,21 @@ func (m WizardModel) updateTriplex(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.config.Format = "nuextract"
 				m.triplexProviderLabel = "NuExtract-2.0"
+				m.extractorService = "nuextract"
 			} else {
 				m.config.Triplex = m.triplex.selected
 				m.triplexProviderLabel = "Triplex"
+				m.extractorService = "triplex"
 			}
 			m.needTriplexKey = m.triplex.needsKey
 			m.triplexEndpoint = m.triplex.selected.Endpoint
+		} else {
+			// Explicit skip: ensure key/endpoint state is also cleared.
+			m.needTriplexKey = false
+			m.triplexEndpoint = ""
+			m.triplexProviderLabel = ""
+			m.extractorService = ""
 		}
-		// When skipped: config.Triplex/NuExtract stay zero, needTriplexKey = false.
 
 		m.stepHistory = append(m.stepHistory, m.step)
 
@@ -329,11 +346,16 @@ func (m WizardModel) updateTriplex(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		extractorSvc := m.extractorService
+		if extractorSvc == "" {
+			extractorSvc = "triplex" // legacy default if no extractor selected (no-op since needTriplexKey=false)
+		}
 		m.keys = newKeysStep(
 			m.needEmbedKey, m.embedProviderLabel, m.embedEndpoint,
 			m.needLLMKey, m.llmProviderLabel, m.llmEndpoint,
 			m.needRerankKey, m.rerankProviderLabel, m.rerankEndpoint,
 			m.needTriplexKey, m.triplexProviderLabel, m.triplexEndpoint,
+			extractorSvc,
 		)
 		m.stepHistory = append(m.stepHistory, m.step)
 		m.step = 5
@@ -391,6 +413,9 @@ func (m WizardModel) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if k, ok := m.keys.collectedKeys["triplex"]; ok {
 					m.config.Triplex.APIKey = k
+				}
+				if k, ok := m.keys.collectedKeys["nuextract"]; ok {
+					m.config.NuExtract.APIKey = k
 				}
 
 				m.confirm.saved = true
