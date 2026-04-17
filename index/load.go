@@ -308,6 +308,24 @@ func Load(ctx context.Context, root string, opts ...LoadOption) (*LoadResult, er
 	}, nil
 }
 
+// Reload rebuilds the knowledge index from root using the given options. It
+// is a semantic alias for Load intended for long-running hosts (daemons, MCP
+// servers, TUI) that need to refresh the index after the underlying markdown
+// files change.
+//
+// Load is already idempotent — calling it twice with the same root produces
+// equivalent indexes — but Reload exists as a named entry point so callers
+// can express intent clearly and so future implementations can add
+// incremental or cache-aware refresh behavior without changing the signature.
+//
+// Concurrency: Reload returns a brand-new *KnowledgeIndex; it never mutates
+// any previously returned index. Callers holding a reference to the old
+// index may continue to read from it safely. See KnowledgeIndex for the
+// recommended swap pattern.
+func Reload(ctx context.Context, root string, opts ...LoadOption) (*LoadResult, error) {
+	return Load(ctx, root, opts...)
+}
+
 // autoEnrichFile reads a file without frontmatter, enriches it with Tier 1
 // deterministic extraction, writes the enriched frontmatter back to disk,
 // and returns the enriched Page.
