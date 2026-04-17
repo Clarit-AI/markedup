@@ -393,18 +393,60 @@ func TestLlamaCppHealthOkInBody(t *testing.T) {
 
 func TestIsNuExtractModel(t *testing.T) {
 	cases := map[string]bool{
-		"numind/NuExtract-2.0-8B":      true,
-		"numind/nuextract-2.0-2b":      true,
-		"NuExtract-2.0-4B":             true,
-		"nuextract-2.0-8B-GGUF":        true,
-		"triplex":                      false,
-		"llama3.1":                     false,
-		"numind/NuExtract-1.5":         false,
-		"":                             false,
+		// Canonical matches
+		"numind/NuExtract-2.0-8B":       true,
+		"numind/nuextract-2.0-2b":       true,
+		"NuExtract-2.0-4B":              true,
+		"nuextract-2.0-8B-GGUF":         true,
+		"someorg/nuextract-2.0-4b-gguf": true, // alt publisher
+		// Rejections
+		"triplex":              false,
+		"llama3.1":             false,
+		"numind/NuExtract-1.5": false,
+		"nuextract-2.0":        false, // missing size suffix
+		"nuextract-2.0foo":     false, // no dash separator
+		"nuextract2.0-8b":      false, // missing hyphen before 2.0
+		"":                     false,
 	}
 	for id, want := range cases {
 		assert.Equal(t, want, IsNuExtractModel(id), "id=%q", id)
 	}
+}
+
+func TestDetectLocal_NuExtractFormatNotTagged(t *testing.T) {
+	srv := newOpenAIModelsServer(t, []string{"llama3.1", "mistral-7b"})
+	defer srv.Close()
+	probes := []probeSpec{{
+		Name:         "LM Studio",
+		Port:         testServerPort(t, srv),
+		ProbePath:    "/v1/models",
+		SuccessCheck: func(code int, _ []byte) bool { return code == http.StatusOK },
+		Type:         "multi",
+		ParseModels:  parseOpenAIModels,
+	}}
+	eps := detectLocalWithProbes(context.Background(), probes)
+	require.Len(t, eps, 1)
+	assert.Empty(t, eps[0].Formats, "non-NuExtract models should not tag Formats")
+}
+
+func TestDetectLocal_NuExtractTaggedOnce(t *testing.T) {
+	srv := newOpenAIModelsServer(t, []string{
+		"numind/NuExtract-2.0-8B",
+		"numind/NuExtract-2.0-2B",
+		"llama3.1",
+	})
+	defer srv.Close()
+	probes := []probeSpec{{
+		Name:         "LM Studio",
+		Port:         testServerPort(t, srv),
+		ProbePath:    "/v1/models",
+		SuccessCheck: func(code int, _ []byte) bool { return code == http.StatusOK },
+		Type:         "multi",
+		ParseModels:  parseOpenAIModels,
+	}}
+	eps := detectLocalWithProbes(context.Background(), probes)
+	require.Len(t, eps, 1)
+	assert.Equal(t, []string{"nuextract"}, eps[0].Formats, "should tag nuextract exactly once")
 }
 
 func TestDetectLocal_NuExtractFormatTagged(t *testing.T) {

@@ -29,11 +29,18 @@ type Endpoint struct {
 }
 
 // IsNuExtractModel reports whether a model id names a NuExtract-2.0 model.
-// Matches "nuextract-2.0-*" or "numind/nuextract-2.0-*" case-insensitively.
+// Matches the canonical form `nuextract-2.0-*` (anchored on the trailing dash)
+// with any `publisher/` prefix stripped. Case-insensitive.
+// Examples matched: "nuextract-2.0-8b", "numind/NuExtract-2.0-2B",
+// "someorg/nuextract-2.0-4b-gguf".
+// Examples rejected: "nuextract-2.0", "nuextract-2.0foo", "nuextract-1.5-*",
+// "nuextract2.0-8b".
 func IsNuExtractModel(id string) bool {
 	lower := strings.ToLower(id)
-	lower = strings.TrimPrefix(lower, "numind/")
-	return strings.HasPrefix(lower, "nuextract-2.0") || strings.HasPrefix(lower, "nuextract2.0")
+	if i := strings.LastIndex(lower, "/"); i >= 0 {
+		lower = lower[i+1:]
+	}
+	return strings.HasPrefix(lower, "nuextract-2.0-")
 }
 
 // probeSpec defines how to detect a single local service.

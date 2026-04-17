@@ -121,10 +121,12 @@ func mergeNuExtract(base, override NuExtractConfig) NuExtractConfig {
 	if override.Transport != "" {
 		out.Transport = override.Transport
 	}
-	if len(override.Predicates) > 0 {
+	// nil = absent from YAML (inherit base); non-nil (including []) = explicit override.
+	// Lets `predicates: []` in local YAML clear an inherited list.
+	if override.Predicates != nil {
 		out.Predicates = override.Predicates
 	}
-	if len(override.EntityTypes) > 0 {
+	if override.EntityTypes != nil {
 		out.EntityTypes = override.EntityTypes
 	}
 	return out

@@ -358,6 +358,56 @@ func TestMergeNuExtract_LocalOverrides(t *testing.T) {
 	assert.Equal(t, "nuextract", out.Format)
 }
 
+func TestLoad_EnvOverridesLocalYAML(t *testing.T) {
+	kbDir := t.TempDir()
+	writeYAML(t, filepath.Join(kbDir, ".markedup.yaml"), `
+nuextract:
+  endpoint: http://from-yaml
+  mode: parallel
+format: triplex
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MARKEDUP_NUEXTRACT_ENDPOINT", "http://from-env")
+	t.Setenv("MARKEDUP_NUEXTRACT_MODE", "single")
+	t.Setenv("MARKEDUP_FORMAT", "nuextract")
+
+	cfg, err := Load(kbDir)
+	require.NoError(t, err)
+	assert.Equal(t, "http://from-env", cfg.NuExtract.Endpoint)
+	assert.Equal(t, "single", cfg.NuExtract.Mode)
+	assert.Equal(t, "nuextract", cfg.Format)
+}
+
+func TestMergeNuExtract_EmptySliceClearsInheritedList(t *testing.T) {
+	base := &Config{
+		NuExtract: NuExtractConfig{
+			Predicates:  []string{"a", "b"},
+			EntityTypes: []string{"X"},
+		},
+	}
+	// nil slice = absent = inherit
+	out := mergeConfigs(base, &Config{NuExtract: NuExtractConfig{}})
+	assert.Equal(t, []string{"a", "b"}, out.NuExtract.Predicates, "nil override should inherit base")
+
+	// empty-but-non-nil slice = explicit clear
+	out = mergeConfigs(base, &Config{NuExtract: NuExtractConfig{
+		Predicates:  []string{},
+		EntityTypes: []string{},
+	}})
+	assert.NotNil(t, out.NuExtract.Predicates)
+	assert.Empty(t, out.NuExtract.Predicates, "[] override should clear inherited predicates")
+	assert.Empty(t, out.NuExtract.EntityTypes)
+}
+
+func TestMergeNuExtract_TransportPreservedAndOverridden(t *testing.T) {
+	base := &Config{NuExtract: NuExtractConfig{Transport: "native"}}
+	out := mergeConfigs(base, &Config{})
+	assert.Equal(t, "native", out.NuExtract.Transport, "base preserved when override empty")
+
+	out = mergeConfigs(base, &Config{NuExtract: NuExtractConfig{Transport: "manual"}})
+	assert.Equal(t, "manual", out.NuExtract.Transport)
+}
+
 // writeYAML is a test helper that writes content to a file.
 func writeYAML(t *testing.T, path, content string) {
 	t.Helper()
