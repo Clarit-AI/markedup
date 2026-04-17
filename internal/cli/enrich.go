@@ -19,15 +19,18 @@ import (
 )
 
 var (
-	enrichDryRun      bool
-	enrichForce       bool
-	enrichSkipExist   bool
-	enrichModel       string
-	enrichEndpoint    string
-	enrichAPIKey      string
-	enrichEntityTypes string
-	enrichPredicates  string
-	enrichTimeout     time.Duration
+	enrichDryRun             bool
+	enrichForce              bool
+	enrichSkipExist          bool
+	enrichModel              string
+	enrichEndpoint           string
+	enrichAPIKey             string
+	enrichEntityTypes        string
+	enrichPredicates         string
+	enrichTimeout            time.Duration
+	enrichFormat             string
+	enrichNuExtractMode      string
+	enrichNuExtractTransport string
 )
 
 func newEnrichCmd() *cobra.Command {
@@ -54,6 +57,9 @@ Partial frontmatter is filled in without overwriting existing fields.`,
 	cmd.Flags().StringVar(&enrichEntityTypes, "entity-types", "", "comma-separated entity types for model extraction")
 	cmd.Flags().StringVar(&enrichPredicates, "predicates", "", "comma-separated relationship predicates for model extraction")
 	cmd.Flags().DurationVar(&enrichTimeout, "timeout", 5*time.Minute, "timeout per file for model extraction (e.g. 5m, 10m)")
+	cmd.Flags().StringVar(&enrichFormat, "format", "", "Tier 2 extractor format: triplex, nuextract, generic (default: auto from config)")
+	cmd.Flags().StringVar(&enrichNuExtractMode, "nuextract-mode", "", "NuExtract run mode: parallel (default) or single")
+	cmd.Flags().StringVar(&enrichNuExtractTransport, "nuextract-transport", "", "NuExtract request transport: native (vLLM/HF) or manual (GGUF). Empty = auto-detect")
 
 	return cmd
 }
@@ -101,27 +107,35 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Fall back to config values when CLI flags are empty.
-	// Use Triplex config if available, otherwise fall back to LLM config.
-	if enrichEndpoint == "" {
-		if appConfig.Triplex.Endpoint != "" {
-			enrichEndpoint = appConfig.Triplex.Endpoint
-		} else {
-			enrichEndpoint = appConfig.LLM.Endpoint
-		}
+	// Resolve Tier 2 format: CLI flag > config.Format > legacy auto-detect.
+	formatName := strings.ToLower(strings.TrimSpace(enrichFormat))
+	if formatName == "" {
+		formatName = strings.ToLower(strings.TrimSpace(appConfig.Format))
 	}
-	if enrichModel == "" {
-		if appConfig.Triplex.Model != "" {
-			enrichModel = appConfig.Triplex.Model
-		} else {
-			enrichModel = appConfig.LLM.Model
+
+	// Fill endpoint/model/apikey from the matching config block for the
+	// resolved format. Falls back to LLM when the format-specific block is empty.
+	switch formatName {
+	case "nuextract":
+		if enrichEndpoint == "" {
+			enrichEndpoint = firstNonEmpty(appConfig.NuExtract.Endpoint, appConfig.LLM.Endpoint)
 		}
-	}
-	if enrichAPIKey == "" {
-		if appConfig.Triplex.APIKey != "" {
-			enrichAPIKey = appConfig.Triplex.APIKey
-		} else {
-			enrichAPIKey = appConfig.LLM.APIKey
+		if enrichModel == "" {
+			enrichModel = firstNonEmpty(appConfig.NuExtract.Model, appConfig.LLM.Model)
+		}
+		if enrichAPIKey == "" {
+			enrichAPIKey = firstNonEmpty(appConfig.NuExtract.APIKey, appConfig.LLM.APIKey)
+		}
+	default:
+		// triplex (explicit), generic, or empty — preserve legacy Triplex-first fallback.
+		if enrichEndpoint == "" {
+			enrichEndpoint = firstNonEmpty(appConfig.Triplex.Endpoint, appConfig.LLM.Endpoint)
+		}
+		if enrichModel == "" {
+			enrichModel = firstNonEmpty(appConfig.Triplex.Model, appConfig.LLM.Model)
+		}
+		if enrichAPIKey == "" {
+			enrichAPIKey = firstNonEmpty(appConfig.Triplex.APIKey, appConfig.LLM.APIKey)
 		}
 	}
 
@@ -133,19 +147,24 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--endpoint is required when --model is specified")
 		}
 
-		// Detect Triplex format: use FormatTriplex when the model came from
-		// the Triplex config section (not the LLM fallback).
-		modelFormat := enrich.FormatGeneric
-		if appConfig.Triplex.Endpoint != "" && enrichEndpoint == appConfig.Triplex.Endpoint {
-			modelFormat = enrich.FormatTriplex
-		}
+		modelFormat := resolveModelFormat(formatName, enrichEndpoint)
 
-		modelExtractor = enrich.NewModelExtractor(enrich.ModelConfig{
+		mc := enrich.ModelConfig{
 			Endpoint: enrichEndpoint,
 			Model:    enrichModel,
 			APIKey:   enrichAPIKey,
 			Format:   modelFormat,
-		})
+		}
+		if modelFormat == enrich.FormatNuExtract {
+			mc.NuExtract = enrich.NuExtractOptions{
+				Mode:        firstNonEmpty(enrichNuExtractMode, appConfig.NuExtract.Mode),
+				Transport:   firstNonEmpty(enrichNuExtractTransport, appConfig.NuExtract.Transport),
+				Predicates:  appConfig.NuExtract.Predicates,
+				EntityTypes: appConfig.NuExtract.EntityTypes,
+			}
+		}
+
+		modelExtractor = enrich.NewModelExtractor(mc)
 		if enrichEntityTypes != "" {
 			entityTypes = strings.Split(enrichEntityTypes, ",")
 			for i := range entityTypes {
@@ -291,6 +310,38 @@ func printDryRun(out io.Writer, relPath string, fm *schema.GraphFrontmatter) {
 	fmt.Fprintf(out, "--- %s ---\n", relPath)
 	fmt.Fprint(out, string(yamlBytes))
 	fmt.Fprintln(out)
+}
+
+// resolveModelFormat picks the enrich.ModelFormat based on (in order):
+// explicit CLI/config format name, then legacy endpoint-origin Triplex
+// match for backward compat, falling back to FormatGeneric.
+func resolveModelFormat(formatName, endpoint string) enrich.ModelFormat {
+	switch formatName {
+	case "nuextract":
+		return enrich.FormatNuExtract
+	case "triplex":
+		return enrich.FormatTriplex
+	case "generic":
+		return enrich.FormatGeneric
+	}
+	// Legacy auto-detect: endpoint matches the Triplex config block.
+	if appConfig.Triplex.Endpoint != "" && endpoint == appConfig.Triplex.Endpoint {
+		return enrich.FormatTriplex
+	}
+	// Auto-detect: endpoint matches the NuExtract config block.
+	if appConfig.NuExtract.Endpoint != "" && endpoint == appConfig.NuExtract.Endpoint {
+		return enrich.FormatNuExtract
+	}
+	return enrich.FormatGeneric
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // collectMarkdownFiles walks a directory and returns .md file paths,

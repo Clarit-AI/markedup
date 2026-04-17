@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/KHAEntertainment/markedup/config"
+	"github.com/KHAEntertainment/markedup/enrich"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -185,4 +187,47 @@ func TestRunEnrich_SingleFile(t *testing.T) {
 	data, err := os.ReadFile(filePath)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "id: single")
+}
+
+func TestEnrichCmd_FormatFlags(t *testing.T) {
+	cmd := newEnrichCmd()
+	for _, name := range []string{"format", "nuextract-mode", "nuextract-transport"} {
+		require.NotNilf(t, cmd.Flags().Lookup(name), "flag --%s should exist", name)
+	}
+}
+
+func TestResolveModelFormat(t *testing.T) {
+	origCfg := appConfig
+	defer func() { appConfig = origCfg }()
+
+	// Explicit CLI/config names win regardless of endpoint.
+	appConfig = &config.Config{
+		Triplex: config.ServiceConfig{Endpoint: "http://triplex.local"},
+	}
+	assert.Equal(t, enrich.FormatNuExtract, resolveModelFormat("nuextract", "http://triplex.local"))
+	assert.Equal(t, enrich.FormatTriplex, resolveModelFormat("triplex", "http://anything"))
+	assert.Equal(t, enrich.FormatGeneric, resolveModelFormat("generic", "http://triplex.local"))
+
+	// Legacy Triplex endpoint-origin auto-detect when name is empty.
+	assert.Equal(t, enrich.FormatTriplex, resolveModelFormat("", "http://triplex.local"))
+
+	// NuExtract endpoint-origin auto-detect when name is empty.
+	appConfig = &config.Config{
+		NuExtract: config.NuExtractConfig{
+			ServiceConfig: config.ServiceConfig{Endpoint: "http://nuextract.cloud"},
+		},
+	}
+	assert.Equal(t, enrich.FormatNuExtract, resolveModelFormat("", "http://nuextract.cloud"))
+
+	// No match → generic.
+	appConfig = &config.Config{}
+	assert.Equal(t, enrich.FormatGeneric, resolveModelFormat("", "http://other"))
+}
+
+func TestFirstNonEmpty(t *testing.T) {
+	assert.Equal(t, "a", firstNonEmpty("a", "b"))
+	assert.Equal(t, "b", firstNonEmpty("", "b"))
+	assert.Equal(t, "c", firstNonEmpty("", "", "c"))
+	assert.Equal(t, "", firstNonEmpty("", "", ""))
+	assert.Equal(t, "", firstNonEmpty())
 }
