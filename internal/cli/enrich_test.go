@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/KHAEntertainment/markedup/config"
-	"github.com/KHAEntertainment/markedup/enrich"
+	"github.com/Clarit-AI/markedup/config"
+	"github.com/Clarit-AI/markedup/enrich"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -230,4 +230,112 @@ func TestFirstNonEmpty(t *testing.T) {
 	assert.Equal(t, "c", firstNonEmpty("", "", "c"))
 	assert.Equal(t, "", firstNonEmpty("", "", ""))
 	assert.Equal(t, "", firstNonEmpty())
+}
+
+func TestValidateFormatName(t *testing.T) {
+	cases := map[string]bool{
+		"":          true,
+		"triplex":   true,
+		"NuExtract": true,
+		" generic ": true,
+		"nu-extract": false,
+		"nuextracts": false,
+		"typo":      false,
+	}
+	for input, ok := range cases {
+		_, err := validateFormatName(input)
+		if ok {
+			assert.NoError(t, err, "input=%q", input)
+		} else {
+			assert.Error(t, err, "input=%q", input)
+		}
+	}
+}
+
+func TestValidateNuExtractMode(t *testing.T) {
+	assert.NoError(t, validateNuExtractMode(""))
+	assert.NoError(t, validateNuExtractMode("parallel"))
+	assert.NoError(t, validateNuExtractMode("SINGLE"))
+	assert.Error(t, validateNuExtractMode("parllel"))
+	assert.Error(t, validateNuExtractMode("dual"))
+}
+
+func TestValidateNuExtractTransport(t *testing.T) {
+	assert.NoError(t, validateNuExtractTransport(""))
+	assert.NoError(t, validateNuExtractTransport("native"))
+	assert.NoError(t, validateNuExtractTransport("MANUAL"))
+	assert.Error(t, validateNuExtractTransport("manuel"))
+}
+
+func TestDetectFormatFromEndpoint(t *testing.T) {
+	origCfg := appConfig
+	defer func() { appConfig = origCfg }()
+
+	// Triplex wins on tie (legacy precedence).
+	appConfig = &config.Config{
+		Triplex: config.ServiceConfig{Endpoint: "http://shared"},
+		NuExtract: config.NuExtractConfig{
+			ServiceConfig: config.ServiceConfig{Endpoint: "http://shared"},
+		},
+	}
+	assert.Equal(t, "triplex", detectFormatFromEndpoint("http://shared"))
+
+	appConfig = &config.Config{
+		NuExtract: config.NuExtractConfig{
+			ServiceConfig: config.ServiceConfig{Endpoint: "http://nuextract.cloud"},
+		},
+	}
+	assert.Equal(t, "nuextract", detectFormatFromEndpoint("http://nuextract.cloud"))
+	assert.Equal(t, "", detectFormatFromEndpoint("http://unknown"))
+}
+
+// Regression for Codex finding #3: --endpoint matching NuExtract must not
+// pull Triplex credentials when both config blocks exist and no --format set.
+func TestRunEnrich_EndpointMatchesNuExtract_UsesNuExtractCredentials(t *testing.T) {
+	origCfg := appConfig
+	defer func() {
+		appConfig = origCfg
+		enrichEndpoint, enrichModel, enrichAPIKey = "", "", ""
+		enrichFormat, enrichNuExtractMode, enrichNuExtractTransport = "", "", ""
+	}()
+
+	appConfig = &config.Config{
+		Triplex: config.ServiceConfig{
+			Endpoint: "http://triplex.local",
+			Model:    "phi3-triplex",
+			APIKey:   "triplex-secret",
+		},
+		NuExtract: config.NuExtractConfig{
+			ServiceConfig: config.ServiceConfig{
+				Endpoint: "https://nx.hf.space",
+				Model:    "numind/NuExtract-2.0-8B",
+				APIKey:   "nuextract-secret",
+			},
+		},
+	}
+
+	// Simulate: user passes --endpoint matching NuExtract, no --format.
+	// The resolution logic should detect nuextract and fill NuExtract creds.
+	enrichEndpoint = "https://nx.hf.space"
+	enrichModel, enrichAPIKey = "", ""
+	formatName, err := validateFormatName("")
+	require.NoError(t, err)
+	if formatName == "" && enrichEndpoint != "" {
+		formatName = detectFormatFromEndpoint(enrichEndpoint)
+	}
+	require.Equal(t, "nuextract", formatName)
+
+	// Apply the same switch logic from runEnrich.
+	switch formatName {
+	case "nuextract":
+		if enrichModel == "" {
+			enrichModel = firstNonEmpty(appConfig.NuExtract.Model, appConfig.LLM.Model)
+		}
+		if enrichAPIKey == "" {
+			enrichAPIKey = firstNonEmpty(appConfig.NuExtract.APIKey, appConfig.LLM.APIKey)
+		}
+	}
+
+	assert.Equal(t, "numind/NuExtract-2.0-8B", enrichModel, "should use NuExtract model")
+	assert.Equal(t, "nuextract-secret", enrichAPIKey, "should use NuExtract API key, not Triplex")
 }

@@ -107,14 +107,28 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Resolve Tier 2 format: CLI flag > config.Format > legacy auto-detect.
-	formatName := strings.ToLower(strings.TrimSpace(enrichFormat))
-	if formatName == "" {
-		formatName = strings.ToLower(strings.TrimSpace(appConfig.Format))
+	// Validate format, mode, transport flags at the CLI boundary.
+	formatName, err := validateFormatName(firstNonEmpty(enrichFormat, appConfig.Format))
+	if err != nil {
+		return err
+	}
+	if err := validateNuExtractMode(enrichNuExtractMode); err != nil {
+		return err
+	}
+	if err := validateNuExtractTransport(enrichNuExtractTransport); err != nil {
+		return err
 	}
 
-	// Fill endpoint/model/apikey from the matching config block for the
-	// resolved format. Falls back to LLM when the format-specific block is empty.
+	// Resolve format BEFORE filling credentials so the credential fallback
+	// reads from the matching config block. --endpoint that matches
+	// cfg.NuExtract.Endpoint must NOT end up with Triplex credentials.
+	if enrichEndpoint != "" && formatName == "" {
+		// Endpoint-origin auto-detect.
+		formatName = detectFormatFromEndpoint(enrichEndpoint)
+	}
+
+	// Fill endpoint/model/apikey from the config block matching the resolved
+	// format. "" (unresolved) falls back to the legacy Triplex-first path.
 	switch formatName {
 	case "nuextract":
 		if enrichEndpoint == "" {
@@ -126,8 +140,18 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 		if enrichAPIKey == "" {
 			enrichAPIKey = firstNonEmpty(appConfig.NuExtract.APIKey, appConfig.LLM.APIKey)
 		}
+	case "triplex":
+		if enrichEndpoint == "" {
+			enrichEndpoint = firstNonEmpty(appConfig.Triplex.Endpoint, appConfig.LLM.Endpoint)
+		}
+		if enrichModel == "" {
+			enrichModel = firstNonEmpty(appConfig.Triplex.Model, appConfig.LLM.Model)
+		}
+		if enrichAPIKey == "" {
+			enrichAPIKey = firstNonEmpty(appConfig.Triplex.APIKey, appConfig.LLM.APIKey)
+		}
 	default:
-		// triplex (explicit), generic, or empty — preserve legacy Triplex-first fallback.
+		// "generic" or "" (nothing resolved) — legacy Triplex-first fallback.
 		if enrichEndpoint == "" {
 			enrichEndpoint = firstNonEmpty(appConfig.Triplex.Endpoint, appConfig.LLM.Endpoint)
 		}
@@ -310,6 +334,50 @@ func printDryRun(out io.Writer, relPath string, fm *schema.GraphFrontmatter) {
 	fmt.Fprintf(out, "--- %s ---\n", relPath)
 	fmt.Fprint(out, string(yamlBytes))
 	fmt.Fprintln(out)
+}
+
+// validateFormatName normalizes and validates a --format / config.format value.
+// Empty input is allowed (returns "" for auto-detect). Unknown names error.
+func validateFormatName(name string) (string, error) {
+	n := strings.ToLower(strings.TrimSpace(name))
+	switch n {
+	case "", "triplex", "nuextract", "generic":
+		return n, nil
+	}
+	return "", fmt.Errorf("invalid --format %q: must be triplex, nuextract, or generic", name)
+}
+
+// validateNuExtractMode validates the --nuextract-mode value. Empty allowed.
+func validateNuExtractMode(mode string) error {
+	m := strings.ToLower(strings.TrimSpace(mode))
+	switch m {
+	case "", "parallel", "single":
+		return nil
+	}
+	return fmt.Errorf("invalid --nuextract-mode %q: must be parallel or single", mode)
+}
+
+// validateNuExtractTransport validates the --nuextract-transport value. Empty allowed.
+func validateNuExtractTransport(transport string) error {
+	t := strings.ToLower(strings.TrimSpace(transport))
+	switch t {
+	case "", "native", "manual":
+		return nil
+	}
+	return fmt.Errorf("invalid --nuextract-transport %q: must be native or manual", transport)
+}
+
+// detectFormatFromEndpoint returns a format name if the endpoint matches a
+// configured block. Triplex wins on tie to preserve legacy behavior; if both
+// blocks share the same endpoint, the user should pass --format explicitly.
+func detectFormatFromEndpoint(endpoint string) string {
+	if appConfig.Triplex.Endpoint != "" && endpoint == appConfig.Triplex.Endpoint {
+		return "triplex"
+	}
+	if appConfig.NuExtract.Endpoint != "" && endpoint == appConfig.NuExtract.Endpoint {
+		return "nuextract"
+	}
+	return ""
 }
 
 // resolveModelFormat picks the enrich.ModelFormat based on (in order):
