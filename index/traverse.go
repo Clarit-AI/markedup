@@ -3,7 +3,7 @@ package index
 import (
 	"fmt"
 
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/schema"
 )
 
 // TraversalStrategy selects between breadth-first and depth-first traversal.

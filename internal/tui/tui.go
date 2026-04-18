@@ -7,8 +7,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
 
-	"github.com/KHAEntertainment/markedup/config"
-	"github.com/KHAEntertainment/markedup/index"
+	"github.com/Clarit-AI/markedup/config"
+	"github.com/Clarit-AI/markedup/index"
 )
 
 // Run launches the TUI with the given knowledge index, KB directory, and config.

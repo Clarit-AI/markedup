@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/KHAEntertainment/markedup/llm"
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/llm"
+	"github.com/Clarit-AI/markedup/schema"
 	"golang.org/x/sync/errgroup"
 )
 

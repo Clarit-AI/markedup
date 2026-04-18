@@ -140,7 +140,7 @@ Reranking supports the same provider model -- local via Ollama or remote via API
 ## Install
 
 ```sh
-go install github.com/KHAEntertainment/markedup/cmd/markedup@latest
+go install github.com/Clarit-AI/markedup/cmd/markedup@latest
 ```
 
 ## Quick Start
@@ -192,8 +192,8 @@ markedup is also a Go library. You can import it as a dependency to load, search
 
 ```go
 import (
-    "github.com/KHAEntertainment/markedup/index"
-    "github.com/KHAEntertainment/markedup/embed"
+    "github.com/Clarit-AI/markedup/index"
+    "github.com/Clarit-AI/markedup/embed"
 )
 
 result, _ := index.Load(ctx, "./my-kb")

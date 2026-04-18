@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/KHAEntertainment/markedup/embed"
-	"github.com/KHAEntertainment/markedup/rerank"
-	"github.com/KHAEntertainment/markedup/schema"
-	"github.com/KHAEntertainment/markedup/temporal"
+	"github.com/Clarit-AI/markedup/embed"
+	"github.com/Clarit-AI/markedup/rerank"
+	"github.com/Clarit-AI/markedup/schema"
+	"github.com/Clarit-AI/markedup/temporal"
 )
 
 // VectorCacheLookup is the subset of cache.VectorCache needed by the search

@@ -13,12 +13,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KHAEntertainment/markedup/embed"
-	"github.com/KHAEntertainment/markedup/enrich"
-	"github.com/KHAEntertainment/markedup/index"
-	"github.com/KHAEntertainment/markedup/llm"
-	"github.com/KHAEntertainment/markedup/markdown"
-	"github.com/KHAEntertainment/markedup/rerank"
+	"github.com/Clarit-AI/markedup/embed"
+	"github.com/Clarit-AI/markedup/enrich"
+	"github.com/Clarit-AI/markedup/index"
+	"github.com/Clarit-AI/markedup/llm"
+	"github.com/Clarit-AI/markedup/markdown"
+	"github.com/Clarit-AI/markedup/rerank"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

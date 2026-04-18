@@ -5,7 +5,7 @@ This guide shows how to use markedup as a Go library for building, querying, and
 ## Install
 
 ```bash
-go get github.com/KHAEntertainment/markedup
+go get github.com/Clarit-AI/markedup
 ```
 
 ---
@@ -42,7 +42,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/KHAEntertainment/markedup/index"
+	"github.com/Clarit-AI/markedup/index"
 )
 
 func main() {
@@ -106,7 +106,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/KHAEntertainment/markedup/index"
+	"github.com/Clarit-AI/markedup/index"
 )
 
 func main() {
@@ -165,7 +165,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/KHAEntertainment/markedup/index"
+	"github.com/Clarit-AI/markedup/index"
 )
 
 func main() {
@@ -219,8 +219,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/KHAEntertainment/markedup/markdown"
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/markdown"
+	"github.com/Clarit-AI/markedup/schema"
 )
 
 func main() {
@@ -272,7 +272,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/schema"
 )
 
 func main() {
@@ -314,7 +314,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/KHAEntertainment/markedup/embed"
+	"github.com/Clarit-AI/markedup/embed"
 )
 
 func main() {
@@ -362,7 +362,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/KHAEntertainment/markedup/rerank"
+	"github.com/Clarit-AI/markedup/rerank"
 )
 
 func main() {
@@ -419,7 +419,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/KHAEntertainment/markedup/llm"
+	"github.com/Clarit-AI/markedup/llm"
 )
 
 func main() {
@@ -476,7 +476,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/KHAEntertainment/markedup/index"
+	"github.com/Clarit-AI/markedup/index"
 )
 
 func main() {
@@ -516,8 +516,8 @@ import (
 	"context"
 	"log"
 
-	"github.com/KHAEntertainment/markedup/cache"
-	"github.com/KHAEntertainment/markedup/index"
+	"github.com/Clarit-AI/markedup/cache"
+	"github.com/Clarit-AI/markedup/index"
 )
 
 func main() {
@@ -549,7 +549,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/KHAEntertainment/markedup/cache"
+	"github.com/Clarit-AI/markedup/cache"
 )
 
 func main() {
@@ -584,9 +584,9 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/KHAEntertainment/markedup/cache"
-	"github.com/KHAEntertainment/markedup/embed"
-	"github.com/KHAEntertainment/markedup/index"
+	"github.com/Clarit-AI/markedup/cache"
+	"github.com/Clarit-AI/markedup/embed"
+	"github.com/Clarit-AI/markedup/index"
 )
 
 func main() {
@@ -719,8 +719,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/KHAEntertainment/markedup/enrich"
-	"github.com/KHAEntertainment/markedup/markdown"
+	"github.com/Clarit-AI/markedup/enrich"
+	"github.com/Clarit-AI/markedup/markdown"
 )
 
 func main() {

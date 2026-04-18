@@ -3,7 +3,7 @@ package cli
 import (
 	"testing"
 
-	"github.com/KHAEntertainment/markedup/rerank"
+	"github.com/Clarit-AI/markedup/rerank"
 	"github.com/stretchr/testify/assert"
 )
 

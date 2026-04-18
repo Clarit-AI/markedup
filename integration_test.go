@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KHAEntertainment/markedup/index"
-	"github.com/KHAEntertainment/markedup/markdown"
-	"github.com/KHAEntertainment/markedup/temporal"
+	"github.com/Clarit-AI/markedup/index"
+	"github.com/Clarit-AI/markedup/markdown"
+	"github.com/Clarit-AI/markedup/temporal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

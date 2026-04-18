@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/KHAEntertainment/markedup/config"
-	"github.com/KHAEntertainment/markedup/index"
-	"github.com/KHAEntertainment/markedup/internal/tui"
-	"github.com/KHAEntertainment/markedup/internal/tui/setup"
+	"github.com/Clarit-AI/markedup/config"
+	"github.com/Clarit-AI/markedup/index"
+	"github.com/Clarit-AI/markedup/internal/tui"
+	"github.com/Clarit-AI/markedup/internal/tui/setup"
 	"github.com/spf13/cobra"
 )
 

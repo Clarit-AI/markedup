@@ -3,7 +3,7 @@ package cli
 import (
 	"strings"
 
-	"github.com/KHAEntertainment/markedup/rerank"
+	"github.com/Clarit-AI/markedup/rerank"
 )
 
 // parseRerankFormat maps a user-provided string to a rerank.Format constant.

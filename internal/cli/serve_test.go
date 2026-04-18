@@ -9,8 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/KHAEntertainment/markedup/index"
-	"github.com/KHAEntertainment/markedup/llm"
+	"github.com/Clarit-AI/markedup/index"
+	"github.com/Clarit-AI/markedup/llm"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

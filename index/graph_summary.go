@@ -3,7 +3,7 @@ package index
 import (
 	"sort"
 
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/schema"
 )
 
 // GraphSummary is a compact, token-efficient representation of the knowledge

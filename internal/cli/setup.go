@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/KHAEntertainment/markedup/config"
+	"github.com/Clarit-AI/markedup/config"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )

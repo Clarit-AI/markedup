@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/KHAEntertainment/markedup/index"
+	"github.com/Clarit-AI/markedup/index"
 	"github.com/spf13/cobra"
 )
 

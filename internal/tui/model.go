@@ -8,10 +8,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/KHAEntertainment/markedup/config"
-	"github.com/KHAEntertainment/markedup/index"
-	"github.com/KHAEntertainment/markedup/internal/tui/setup"
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/config"
+	"github.com/Clarit-AI/markedup/index"
+	"github.com/Clarit-AI/markedup/internal/tui/setup"
+	"github.com/Clarit-AI/markedup/schema"
 )
 
 // view represents which screen the TUI is currently showing.

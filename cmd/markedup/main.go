@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/KHAEntertainment/markedup/internal/cli"
+	"github.com/Clarit-AI/markedup/internal/cli"
 )
 
 func main() {
