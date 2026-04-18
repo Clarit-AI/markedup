@@ -3,7 +3,7 @@
 A knowledge graph built from plain markdown files. No database required.
 
 ![Go 1.22+](https://img.shields.io/badge/Go-1.22%2B-blue)
-![License](https://img.shields.io/badge/license-TBD-lightgrey)
+![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 
 ## The Problem
 
@@ -207,7 +207,8 @@ See [docs/go-library.md](docs/go-library.md) for the full API guide.
 | [docs/schema-reference.md](docs/schema-reference.md) | Frontmatter fields, validation rules, Obsidian compatibility |
 | [docs/mcp-tools.md](docs/mcp-tools.md) | MCP tool names, parameters, and example payloads |
 | [docs/go-library.md](docs/go-library.md) | Using markedup as a Go library (including enrich package) |
+| [docs/architecture.md](docs/architecture.md) | Tech-stack decisions, module layout, and design rationale |
 
 ## License
 
-TBD
+Licensed under the [Apache License, Version 2.0](LICENSE). You may not use this project except in compliance with that license.

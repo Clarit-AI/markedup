@@ -6,3 +6,17 @@
 
 # Knowledge cache (graph + vector tiers)
 .knowledge/
+
+# Secrets and credentials (defensive — never commit these)
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+credentials.json
+
+# Agent / local-tooling scratch space
+.claude/
+
+# Local dev fixture — clone of /docs used to feed the markedup engine
+test_dir/
