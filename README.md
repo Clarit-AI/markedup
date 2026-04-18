@@ -4,6 +4,9 @@ A knowledge graph built from plain markdown files. No database required.
 
 ![Go 1.22+](https://img.shields.io/badge/Go-1.22%2B-blue)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
+![Status: Work in Progress](https://img.shields.io/badge/status-work%20in%20progress-orange)
+
+> ⚠️ **Work in progress.** markedup is under active development — the API surface, CLI flags, and on-disk schema may still change between commits. The library is usable today (Clarit-AI's Plexium consumes it as a dependency), but a tagged stable release is still pending. Check back soon.
 
 ## The Problem
 
