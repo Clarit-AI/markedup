@@ -1,4 +1,4 @@
-# PROJECT_CONTEXT
+# Architecture
 
 ## Repository Info
 - **Repo URL**: https://github.com/KHAEntertainment/markedup
