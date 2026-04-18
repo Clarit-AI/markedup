@@ -10,17 +10,22 @@ import (
 )
 
 // KnowledgeIndex is the core read-only index over all parsed pages. It is
-// built by Load (or Import) and is immutable thereafter — no exported or
-// internal mutation methods exist.
+// built by Load (or Import) and is never mutated by its own methods.
 //
 // Concurrency: all read methods (Get, All, Pages, Entities, Relationships,
 // Tags, ByTag, ForwardRels, ReverseRefs, Export, CompactGraphSummary,
 // Search, Traverse) are safe for concurrent use from multiple goroutines
-// without external synchronization. The typical pattern for long-running
-// hosts (daemons, MCP servers) is to hold a *KnowledgeIndex behind an
-// atomic.Pointer or a sync.RWMutex, rebuild a new index on the side via
-// Load/Reload, then atomically swap the pointer. In-flight readers on the
-// old index remain valid and cannot observe partial state.
+// **provided callers do not mutate the values they return**. Get and All
+// hand out *schema.Page pointers into the internal map; ByTag, ForwardRels,
+// and ReverseRefs return the internal slices directly. Mutating any of
+// these would be observable by other readers. Treat everything the index
+// returns as read-only; clone first if you need to modify.
+//
+// The typical pattern for long-running hosts (daemons, MCP servers) is to
+// hold a *KnowledgeIndex behind an atomic.Pointer or sync.RWMutex, rebuild
+// a new index on the side via Load/Reload, then atomically swap the
+// pointer. In-flight readers on the old index remain valid and cannot
+// observe partial state.
 type KnowledgeIndex struct {
 	byID       map[string]*schema.Page
 	byTag      map[string][]*schema.Page

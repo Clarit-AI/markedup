@@ -1,6 +1,8 @@
 package enrich
 
 import (
+	"strings"
+
 	"github.com/KHAEntertainment/markedup/schema"
 )
 
@@ -9,25 +11,50 @@ import (
 // result of enrichment without having to diff the before/after frontmatter
 // themselves.
 //
-// A field appears in the delta if it was empty/zero in the input frontmatter
-// AND populated by the extracted fields. In Force mode, fields appear if the
-// extracted value differed from the input value.
+// Semantics:
+//   - Scalar *Changed fields are true iff the post-merge value differs from
+//     the pre-merge value. This captures both default-mode fills and
+//     force-mode overwrites uniformly.
+//   - *Added slices hold items present after but absent before (matched
+//     case-insensitively for string fields, by Target for relationships, by
+//     Name for entities).
+//   - *Removed slices hold items present before but absent after. These are
+//     only populated in force mode (MergeOptions.Force=true); default mode
+//     is union-only and cannot drop items.
+//   - RelationshipsModified holds the post-merge value of relationships whose
+//     Target is present both before and after but whose Type or Strength
+//     differs. This catches force-mode per-target replacements that neither
+//     Added nor Removed would surface.
+//   - Changed is true iff any of the above is non-zero — the recommended
+//     single-source signal for "should I persist this page?"
 type EnrichmentDelta struct {
-	// Scalar fields that were changed by the merge.
+	// Scalar changes
 	IDChanged         bool
 	TitleChanged      bool
 	EntityTypeChanged bool
 	ConfidenceChanged bool
 	CreatedByChanged  bool
+	SummaryChanged    bool
 
-	// Collection fields. The slices hold only the newly-added items (not
-	// the full post-merge list).
-	TagsAdded          []string
-	RelationshipsAdded []schema.Relationship
-	SourcesAdded       []string
+	// Collection additions/removals. Added/Removed are symmetric; Modified
+	// captures relationship body changes with the same Target.
+	TagsAdded             []string
+	TagsRemoved           []string
+	RelationshipsAdded    []schema.Relationship
+	RelationshipsRemoved  []schema.Relationship
+	RelationshipsModified []schema.Relationship
+	SourcesAdded          []string
+	SourcesRemoved        []string
+	EntitiesAdded         []schema.Entity
+	EntitiesRemoved       []schema.Entity
+	SemanticHintsAdded    []string
+	SemanticHintsRemoved  []string
+	QuestionsAdded        []string
+	QuestionsRemoved      []string
 
-	// Changed reports whether any field in the delta is non-zero. Useful
-	// for callers that want to skip writing unchanged pages.
+	// Changed is true iff any field above is non-zero. Callers that only
+	// need a persist/skip signal can read this instead of inspecting
+	// individual fields.
 	Changed bool
 }
 
@@ -36,21 +63,21 @@ type EnrichmentDelta struct {
 // fields into the page's existing frontmatter, and returns the enriched
 // page plus a structured delta describing what changed.
 //
-// The input page is not mutated. The returned page is a copy with the
-// merged frontmatter; its Body and SourcePath are preserved from the input.
-// Nothing is written to disk — that is the caller's responsibility.
+// The input page and the slices inside its Frontmatter are not mutated;
+// the returned page's Frontmatter holds deep-copied slices. Body and
+// SourcePath are preserved by value. Nothing is written to disk.
 //
 // This is the preferred entry point for external callers that want to
 // capture enrichment results structurally (e.g. to populate a separate
-// manifest or database) without the side effect of frontmatter being
-// written back to the markdown file on disk.
+// manifest or database) without frontmatter being written back to the
+// markdown file on disk.
 func EnrichPage(page *schema.Page, filePath, rootDir string, opts MergeOptions) (*schema.Page, EnrichmentDelta) {
 	extracted := ExtractFromDocument(filePath, page.Body, rootDir)
 	merged := MergeFrontmatter(page.Frontmatter, extracted, opts)
-	delta := computeDelta(page.Frontmatter, merged, extracted, opts)
+	delta := computeDelta(page.Frontmatter, merged)
 
 	out := &schema.Page{
-		Frontmatter: merged,
+		Frontmatter: cloneFrontmatter(merged),
 		Body:        page.Body,
 		SourcePath:  page.SourcePath,
 	}
@@ -61,7 +88,8 @@ func EnrichPage(page *schema.Page, filePath, rootDir string, opts MergeOptions) 
 // ModelResult (from ModelExtractor.Extract and/or a generated summary) into
 // the page's frontmatter and returns the enriched page plus delta.
 //
-// The input page is not mutated and nothing is written to disk.
+// Ownership semantics match EnrichPage: input page and its frontmatter
+// slices are not mutated, returned page holds deep-copied slices.
 func EnrichPageWithModel(page *schema.Page, model *ModelResult, summary string, opts MergeOptions) (*schema.Page, EnrichmentDelta) {
 	merged := page.Frontmatter
 	if model != nil {
@@ -70,20 +98,21 @@ func EnrichPageWithModel(page *schema.Page, model *ModelResult, summary string, 
 	if summary != "" {
 		merged = MergeSummary(merged, summary, opts)
 	}
-	delta := computeModelDelta(page.Frontmatter, merged)
+	delta := computeDelta(page.Frontmatter, merged)
 
 	out := &schema.Page{
-		Frontmatter: merged,
+		Frontmatter: cloneFrontmatter(merged),
 		Body:        page.Body,
 		SourcePath:  page.SourcePath,
 	}
 	return out, delta
 }
 
-// computeDelta produces an EnrichmentDelta by comparing the pre-merge
-// frontmatter against the post-merge frontmatter, using the extracted
-// fields to identify which collection items are "new".
-func computeDelta(before, after schema.GraphFrontmatter, extracted ExtractedFields, opts MergeOptions) EnrichmentDelta {
+// computeDelta produces an EnrichmentDelta by structurally comparing before
+// and after frontmatter. It captures default-mode additions, force-mode
+// replacements (add + remove on the same field), and relationship body
+// changes against a shared Target.
+func computeDelta(before, after schema.GraphFrontmatter) EnrichmentDelta {
 	d := EnrichmentDelta{}
 
 	if before.ID != after.ID {
@@ -101,137 +130,150 @@ func computeDelta(before, after schema.GraphFrontmatter, extracted ExtractedFiel
 	if before.Provenance.CreatedBy != after.Provenance.CreatedBy {
 		d.CreatedByChanged = true
 	}
+	if before.Summary != after.Summary {
+		d.SummaryChanged = true
+	}
 
-	d.TagsAdded = addedStrings(before.Tags, after.Tags)
-	d.RelationshipsAdded = addedRelationships(before.Relationships, after.Relationships)
-	d.SourcesAdded = addedStrings(before.Provenance.Sources, after.Provenance.Sources)
+	d.TagsAdded, d.TagsRemoved = diffStringsCaseInsensitive(before.Tags, after.Tags)
+	d.SourcesAdded, d.SourcesRemoved = diffStringsCaseInsensitive(before.Provenance.Sources, after.Provenance.Sources)
+	d.SemanticHintsAdded, d.SemanticHintsRemoved = diffStringsCaseInsensitive(before.SemanticHints, after.SemanticHints)
+	d.QuestionsAdded, d.QuestionsRemoved = diffStringsCaseInsensitive(before.PossibleQuestions, after.PossibleQuestions)
 
-	// Suppress unused param warning; opts is accepted for future extension
-	// (e.g. reporting overwritten-in-force-mode).
-	_ = opts
+	d.RelationshipsAdded, d.RelationshipsRemoved, d.RelationshipsModified =
+		diffRelationships(before.Relationships, after.Relationships)
+
+	d.EntitiesAdded, d.EntitiesRemoved = diffEntities(before.Entities, after.Entities)
 
 	d.Changed = d.IDChanged || d.TitleChanged || d.EntityTypeChanged ||
-		d.ConfidenceChanged || d.CreatedByChanged ||
-		len(d.TagsAdded) > 0 || len(d.RelationshipsAdded) > 0 ||
-		len(d.SourcesAdded) > 0
+		d.ConfidenceChanged || d.CreatedByChanged || d.SummaryChanged ||
+		len(d.TagsAdded) > 0 || len(d.TagsRemoved) > 0 ||
+		len(d.SourcesAdded) > 0 || len(d.SourcesRemoved) > 0 ||
+		len(d.SemanticHintsAdded) > 0 || len(d.SemanticHintsRemoved) > 0 ||
+		len(d.QuestionsAdded) > 0 || len(d.QuestionsRemoved) > 0 ||
+		len(d.RelationshipsAdded) > 0 || len(d.RelationshipsRemoved) > 0 ||
+		len(d.RelationshipsModified) > 0 ||
+		len(d.EntitiesAdded) > 0 || len(d.EntitiesRemoved) > 0
+
 	return d
 }
 
-// computeModelDelta is the Tier 2 version — it additionally tracks entity
-// and summary-field changes that model extraction can introduce.
-func computeModelDelta(before, after schema.GraphFrontmatter) EnrichmentDelta {
-	d := EnrichmentDelta{}
-
-	if before.ID != after.ID {
-		d.IDChanged = true
-	}
-	if before.Title != after.Title {
-		d.TitleChanged = true
-	}
-	if before.EntityType != after.EntityType {
-		d.EntityTypeChanged = true
-	}
-	if before.Confidence != after.Confidence {
-		d.ConfidenceChanged = true
-	}
-	if before.Provenance.CreatedBy != after.Provenance.CreatedBy {
-		d.CreatedByChanged = true
-	}
-
-	d.TagsAdded = addedStrings(before.Tags, after.Tags)
-	d.RelationshipsAdded = addedRelationships(before.Relationships, after.Relationships)
-	d.SourcesAdded = addedStrings(before.Provenance.Sources, after.Provenance.Sources)
-
-	d.Changed = d.IDChanged || d.TitleChanged || d.EntityTypeChanged ||
-		d.ConfidenceChanged || d.CreatedByChanged ||
-		before.Summary != after.Summary ||
-		len(d.TagsAdded) > 0 || len(d.RelationshipsAdded) > 0 ||
-		len(d.SourcesAdded) > 0 ||
-		!entitySlicesEqual(before.Entities, after.Entities) ||
-		!stringSlicesEqual(before.SemanticHints, after.SemanticHints) ||
-		!stringSlicesEqual(before.PossibleQuestions, after.PossibleQuestions)
-	return d
-}
-
-// addedStrings returns elements in after that are not in before
-// (case-insensitive match), preserving after's order.
-func addedStrings(before, after []string) []string {
-	if len(after) == 0 {
-		return nil
-	}
+// diffStringsCaseInsensitive returns (added, removed) where items are
+// compared via strings.ToLower, matching unionStrings in merge.go. Result
+// order is preserved from the input slices.
+func diffStringsCaseInsensitive(before, after []string) (added, removed []string) {
 	beforeSet := make(map[string]struct{}, len(before))
 	for _, s := range before {
-		beforeSet[stringsFold(s)] = struct{}{}
+		beforeSet[strings.ToLower(s)] = struct{}{}
 	}
-	var added []string
+	afterSet := make(map[string]struct{}, len(after))
 	for _, s := range after {
-		if _, ok := beforeSet[stringsFold(s)]; !ok {
+		afterSet[strings.ToLower(s)] = struct{}{}
+	}
+	for _, s := range after {
+		if _, ok := beforeSet[strings.ToLower(s)]; !ok {
 			added = append(added, s)
 		}
 	}
-	return added
+	for _, s := range before {
+		if _, ok := afterSet[strings.ToLower(s)]; !ok {
+			removed = append(removed, s)
+		}
+	}
+	return added, removed
 }
 
-// addedRelationships returns relationships in after whose Target is not in
-// before, preserving after's order.
-func addedRelationships(before, after []schema.Relationship) []schema.Relationship {
-	if len(after) == 0 {
+// diffRelationships categorizes the post-merge relationships into:
+//   - added:    Target present in after but not before
+//   - removed:  Target present in before but not after
+//   - modified: Target in both but Type or Strength differs (post-merge value)
+//
+// This mirrors unionRelationships in merge.go (which dedupes by Target) and
+// additionally detects the force-mode case where MergeFrontmatter replaces
+// the entire slice.
+func diffRelationships(before, after []schema.Relationship) (added, removed, modified []schema.Relationship) {
+	beforeByTarget := make(map[string]schema.Relationship, len(before))
+	for _, r := range before {
+		beforeByTarget[r.Target] = r
+	}
+	afterByTarget := make(map[string]schema.Relationship, len(after))
+	for _, r := range after {
+		afterByTarget[r.Target] = r
+	}
+
+	for _, r := range after {
+		if prev, ok := beforeByTarget[r.Target]; !ok {
+			added = append(added, r)
+		} else if prev.Type != r.Type || prev.Strength != r.Strength {
+			modified = append(modified, r)
+		}
+	}
+	for _, r := range before {
+		if _, ok := afterByTarget[r.Target]; !ok {
+			removed = append(removed, r)
+		}
+	}
+	return added, removed, modified
+}
+
+// diffEntities returns (added, removed) compared by Name.
+func diffEntities(before, after []schema.Entity) (added, removed []schema.Entity) {
+	beforeByName := make(map[string]struct{}, len(before))
+	for _, e := range before {
+		beforeByName[e.Name] = struct{}{}
+	}
+	afterByName := make(map[string]struct{}, len(after))
+	for _, e := range after {
+		afterByName[e.Name] = struct{}{}
+	}
+	for _, e := range after {
+		if _, ok := beforeByName[e.Name]; !ok {
+			added = append(added, e)
+		}
+	}
+	for _, e := range before {
+		if _, ok := afterByName[e.Name]; !ok {
+			removed = append(removed, e)
+		}
+	}
+	return added, removed
+}
+
+// cloneFrontmatter returns a deep copy of the given GraphFrontmatter. All
+// slice fields (including nested Entity.Aliases) get fresh backing arrays
+// so the caller can safely mutate them without affecting the source.
+func cloneFrontmatter(fm schema.GraphFrontmatter) schema.GraphFrontmatter {
+	cp := fm
+	cp.Tags = cloneStrings(fm.Tags)
+	cp.Relationships = cloneRelationships(fm.Relationships)
+	cp.SemanticHints = cloneStrings(fm.SemanticHints)
+	cp.PossibleQuestions = cloneStrings(fm.PossibleQuestions)
+	cp.Provenance.Sources = cloneStrings(fm.Provenance.Sources)
+	if len(fm.Entities) > 0 {
+		cp.Entities = make([]schema.Entity, len(fm.Entities))
+		for i, e := range fm.Entities {
+			cp.Entities[i] = e
+			cp.Entities[i].Aliases = cloneStrings(e.Aliases)
+		}
+	} else {
+		cp.Entities = nil
+	}
+	return cp
+}
+
+func cloneStrings(s []string) []string {
+	if len(s) == 0 {
 		return nil
 	}
-	beforeSet := make(map[string]struct{}, len(before))
-	for _, r := range before {
-		beforeSet[r.Target] = struct{}{}
-	}
-	var added []schema.Relationship
-	for _, r := range after {
-		if _, ok := beforeSet[r.Target]; !ok {
-			added = append(added, r)
-		}
-	}
-	return added
+	out := make([]string, len(s))
+	copy(out, s)
+	return out
 }
 
-// stringsFold is a minimal case-fold helper that matches the semantics used
-// by unionStrings (lower-case equivalence).
-func stringsFold(s string) string {
-	out := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		out[i] = c
+func cloneRelationships(r []schema.Relationship) []schema.Relationship {
+	if len(r) == 0 {
+		return nil
 	}
-	return string(out)
-}
-
-// stringSlicesEqual returns true iff a and b have the same elements in the
-// same order.
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// entitySlicesEqual returns true iff a and b have the same entities in the
-// same order (comparing Name, Aliases, and Role).
-func entitySlicesEqual(a, b []schema.Entity) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Name != b[i].Name || a[i].Role != b[i].Role {
-			return false
-		}
-		if !stringSlicesEqual(a[i].Aliases, b[i].Aliases) {
-			return false
-		}
-	}
-	return true
+	out := make([]schema.Relationship, len(r))
+	copy(out, r)
+	return out
 }
