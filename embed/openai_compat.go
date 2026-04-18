@@ -39,6 +39,24 @@ type OpenAICompatibleEmbedder struct {
 	httpClient *http.Client
 }
 
+// NewFromProvider is a convenience constructor for external callers that want
+// to build an OpenAI-compatible embedder from flat provider settings (e.g.
+// config inheritance from a host application like Plexium's assistiveAgent
+// provider block). It is equivalent to NewOpenAICompatible with a Config
+// populated from the given parameters and sensible defaults.
+//
+// endpoint is the base URL (without trailing /v1/embeddings); model is the
+// embedding model identifier; apiKey is the bearer token (empty for local
+// endpoints); dims is the expected embedding dimensionality.
+func NewFromProvider(endpoint, model, apiKey string, dims int) *OpenAICompatibleEmbedder {
+	return NewOpenAICompatible(Config{
+		Endpoint:  endpoint,
+		ModelName: model,
+		APIKey:    apiKey,
+		Dims:      dims,
+	})
+}
+
 // NewOpenAICompatible creates an OpenAICompatibleEmbedder from the given config.
 func NewOpenAICompatible(cfg Config) *OpenAICompatibleEmbedder {
 	batchSize := cfg.BatchSize
