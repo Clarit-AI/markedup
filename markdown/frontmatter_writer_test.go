@@ -107,6 +107,51 @@ func TestReplaceFrontmatter_BodyPreservedByteForByte(t *testing.T) {
 		"body mismatch:\nexpected: %q\ngot:      %q", body, resultBody)
 }
 
+// TestReplaceFrontmatter_StripsStackedLeadingBlocks guards the issue #108
+// invariant: when a file pathologically contains multiple consecutive
+// leading `---...---` blocks (from a manual edit or upstream tool bug),
+// ReplaceFrontmatter must strip ALL of them and emit exactly one.
+func TestReplaceFrontmatter_StripsStackedLeadingBlocks(t *testing.T) {
+	original := []byte("---\nid: first\n---\n\n---\nid: stale\nrelationships:\n  - target: ghost\n    type: old\n    strength: 0.1\n---\n\n# Real Body\n\nContent.\n")
+	fm := &schema.GraphFrontmatter{
+		ID:         "merged",
+		Title:      "Merged",
+		EntityType: "concept",
+		Confidence: 0.9,
+	}
+
+	result, err := ReplaceFrontmatter(fm, original)
+	require.NoError(t, err)
+
+	// Exactly one `^relationships:` would show up if present; here fm has
+	// none so we expect zero. The critical assertion is that the stale
+	// leading block with `relationships:` was stripped entirely.
+	assert.NotContains(t, string(result), "id: stale",
+		"stale stacked frontmatter block must be stripped")
+	assert.NotContains(t, string(result), "target: ghost",
+		"stale frontmatter body must be stripped")
+	assert.Contains(t, string(result), "id: merged")
+	assert.Contains(t, string(result), "# Real Body")
+
+	// Idempotency: running ReplaceFrontmatter again should be a no-op on
+	// block count.
+	result2, err := ReplaceFrontmatter(fm, result)
+	require.NoError(t, err)
+	assert.Equal(t, result, result2, "ReplaceFrontmatter must be idempotent")
+
+	// Count leading `---` pairs. A well-formed single-FM file has exactly
+	// two `---` lines at the top, separated by YAML.
+	assert.Equal(t, 2, bytes.Count(result, []byte("\n---\n"))+boolToInt(bytes.HasPrefix(result, []byte("---\n"))),
+		"result must contain exactly one leading frontmatter block")
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func TestWriteFrontmatterFile_Atomic(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.md")

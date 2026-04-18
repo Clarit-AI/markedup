@@ -30,6 +30,12 @@ func PrependFrontmatter(fm *schema.GraphFrontmatter, body string) ([]byte, error
 // ReplaceFrontmatter replaces existing YAML frontmatter in data with the
 // serialized fm, preserving the body after the closing --- delimiter exactly.
 // If data has no frontmatter, behaves like PrependFrontmatter.
+//
+// If the input contains multiple consecutive leading YAML frontmatter blocks
+// (separated only by whitespace) — a malformed state that can arise from
+// manual edits or upstream tool bugs — all of them are stripped and replaced
+// by the single serialized fm. This keeps the writer idempotent and prevents
+// stale `relationships:` / `entities:` blocks from surviving an enrich pass.
 func ReplaceFrontmatter(fm *schema.GraphFrontmatter, data []byte) ([]byte, error) {
 	loc := frontmatterRe.FindSubmatchIndex(data)
 	if loc == nil {
@@ -47,6 +53,19 @@ func ReplaceFrontmatter(fm *schema.GraphFrontmatter, data []byte) ([]byte, error
 	bodyStart := loc[4]
 	originalBody := data[bodyStart:]
 
+	// Greedily strip any additional leading `---\n...\n---\n?` blocks that
+	// appear after whitespace-only separators. This handles pathological
+	// inputs with stacked frontmatter blocks (see fix for issue #108).
+	for {
+		trimmed := trimLeadingWhitespace(originalBody)
+		inner := frontmatterRe.FindSubmatchIndex(trimmed)
+		if inner == nil {
+			break
+		}
+		// inner[4] is the start of the body capture within trimmed.
+		originalBody = trimmed[inner[4]:]
+	}
+
 	var b strings.Builder
 	b.WriteString("---\n")
 	b.Write(yamlBytes)
@@ -54,6 +73,22 @@ func ReplaceFrontmatter(fm *schema.GraphFrontmatter, data []byte) ([]byte, error
 	b.Write(originalBody)
 
 	return []byte(b.String()), nil
+}
+
+// trimLeadingWhitespace returns b with any leading ASCII whitespace (space,
+// tab, newline, carriage return) removed. Kept separate from strings.TrimLeft
+// to avoid an unnecessary []byte↔string conversion on large bodies.
+func trimLeadingWhitespace(b []byte) []byte {
+	i := 0
+	for i < len(b) {
+		c := b[i]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			i++
+			continue
+		}
+		break
+	}
+	return b[i:]
 }
 
 // WriteFrontmatterFile atomically writes content to path using a

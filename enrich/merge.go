@@ -32,13 +32,21 @@ func MergeFrontmatter(existing schema.GraphFrontmatter, extracted ExtractedField
 			result.Confidence = extracted.Confidence
 		}
 		if len(extracted.Tags) > 0 {
-			result.Tags = extracted.Tags
+			result.Tags = dedupeStringsCaseInsensitive(extracted.Tags)
 		}
 		if len(extracted.Relationships) > 0 {
-			result.Relationships = extracted.Relationships
+			result.Relationships = dedupeRelationships(extracted.Relationships)
+		}
+		// ExtractedFields carries no Entities of its own — Tier 1 is relationship-
+		// and tag-focused — but existing.Entities flows through the force branch
+		// unchanged. Dedupe it so a previously-written stale duplicate on the
+		// entities list gets cleaned up on the next force enrich. Mirrors the
+		// relationships dedup above (issue #108 AC #4).
+		if len(result.Entities) > 0 {
+			result.Entities = dedupeEntities(result.Entities)
 		}
 		if len(extracted.Provenance.Sources) > 0 {
-			result.Provenance.Sources = extracted.Provenance.Sources
+			result.Provenance.Sources = dedupeStringsCaseInsensitive(extracted.Provenance.Sources)
 		}
 		if extracted.Provenance.CreatedBy != "" {
 			result.Provenance.CreatedBy = extracted.Provenance.CreatedBy
@@ -61,6 +69,12 @@ func MergeFrontmatter(existing schema.GraphFrontmatter, extracted ExtractedField
 	}
 	if result.Provenance.CreatedBy == "" {
 		result.Provenance.CreatedBy = extracted.Provenance.CreatedBy
+	}
+
+	// Dedupe entities flowing through from existing. ExtractedFields carries
+	// no Entities, but existing may contain stale duplicates (issue #108 AC #4).
+	if len(result.Entities) > 0 {
+		result.Entities = dedupeEntities(result.Entities)
 	}
 
 	// Union tags (case-insensitive dedup).
@@ -118,22 +132,96 @@ func unionStrings(a, b []string) []string {
 	return result
 }
 
-// unionRelationships appends relationships from b whose Target is not in a.
+// unionRelationships appends relationships from b whose (Target, Type) key is
+// not already present in a. Dedup is done on the composite (Target, Type) key
+// so that two predicates between the same target pair are preserved, but an
+// exact repeat is collapsed. Input a is also deduped against itself so a
+// stale input with same-key duplicates gets cleaned up.
 func unionRelationships(a, b []schema.Relationship) []schema.Relationship {
 	if len(a) == 0 && len(b) == 0 {
 		return nil
 	}
-	seen := make(map[string]bool)
-	result := make([]schema.Relationship, len(a))
-	copy(result, a)
+	seen := make(map[relKey]bool, len(a)+len(b))
+	result := make([]schema.Relationship, 0, len(a)+len(b))
 	for _, r := range a {
-		seen[r.Target] = true
+		k := relKey{Target: r.Target, Type: r.Type}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		result = append(result, r)
 	}
 	for _, r := range b {
-		if !seen[r.Target] {
-			seen[r.Target] = true
-			result = append(result, r)
+		k := relKey{Target: r.Target, Type: r.Type}
+		if seen[k] {
+			continue
 		}
+		seen[k] = true
+		result = append(result, r)
 	}
 	return result
+}
+
+// relKey is the composite identity key used to dedupe relationships.
+type relKey struct {
+	Target string
+	Type   string
+}
+
+// dedupeRelationships removes within-list duplicates keyed by (Target, Type),
+// preserving first-seen order. Used in force-mode merges where the incoming
+// slice replaces the existing one wholesale.
+func dedupeRelationships(in []schema.Relationship) []schema.Relationship {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[relKey]bool, len(in))
+	out := make([]schema.Relationship, 0, len(in))
+	for _, r := range in {
+		k := relKey{Target: r.Target, Type: r.Type}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, r)
+	}
+	return out
+}
+
+// dedupeEntities removes within-list duplicates keyed by lowercased Name,
+// preserving first-seen order. Used in force-mode merges.
+func dedupeEntities(in []schema.Entity) []schema.Entity {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(in))
+	out := make([]schema.Entity, 0, len(in))
+	for _, e := range in {
+		k := strings.ToLower(e.Name)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, e)
+	}
+	return out
+}
+
+// dedupeStringsCaseInsensitive removes case-insensitive duplicates from in,
+// preserving first-seen order and the original casing of the first occurrence.
+func dedupeStringsCaseInsensitive(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		k := strings.ToLower(s)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, s)
+	}
+	return out
 }

@@ -187,18 +187,25 @@ func TestMergeFrontmatter_RelationshipDedup(t *testing.T) {
 	}
 	extracted := ExtractedFields{
 		Relationships: []schema.Relationship{
-			{Target: "target-a", Type: "related-to", Strength: 0.5}, // same target, different type
+			// Same target as existing but a different type: kept as a
+			// distinct edge. Dedup key is (Target, Type), not Target alone.
+			{Target: "target-a", Type: "related-to", Strength: 0.5},
+			// Exact duplicate of the existing edge: collapsed.
+			{Target: "target-a", Type: "implements", Strength: 0.8},
 			{Target: "target-b", Type: "related-to", Strength: 0.5},
 		},
 	}
 
 	result := MergeFrontmatter(existing, extracted, MergeOptions{})
 
-	// target-a should not be duplicated
-	assert.Len(t, result.Relationships, 2)
+	// (target-a, implements) dedupes against existing; (target-a, related-to)
+	// is a new edge; (target-b, related-to) is new.
+	assert.Len(t, result.Relationships, 3)
 	assert.Equal(t, "target-a", result.Relationships[0].Target)
 	assert.Equal(t, "implements", result.Relationships[0].Type) // original preserved
-	assert.Equal(t, "target-b", result.Relationships[1].Target)
+	assert.Equal(t, "target-a", result.Relationships[1].Target)
+	assert.Equal(t, "related-to", result.Relationships[1].Type)
+	assert.Equal(t, "target-b", result.Relationships[2].Target)
 }
 
 func TestMergeSummary_EmptyExisting(t *testing.T) {
@@ -269,4 +276,149 @@ func TestIsComplete(t *testing.T) {
 			assert.Equal(t, tt.want, IsComplete(tt.fm))
 		})
 	}
+}
+
+// TestMergeFrontmatter_ForceDedupesInput guards the force-mode path against
+// a model (or deterministic extractor) returning within-list duplicates of
+// the same (Target, Type) edge — the observable symptom behind issue #108.
+func TestMergeFrontmatter_ForceDedupesInput(t *testing.T) {
+	existing := schema.GraphFrontmatter{
+		ID:         "prev",
+		Title:      "Prev",
+		EntityType: "concept",
+		Confidence: 0.9,
+		Relationships: []schema.Relationship{
+			{Target: "old", Type: "related-to", Strength: 0.5},
+		},
+	}
+	extracted := ExtractedFields{
+		Relationships: []schema.Relationship{
+			{Target: "foo", Type: "related-to", Strength: 0.5},
+			{Target: "foo", Type: "related-to", Strength: 0.9}, // exact-key dup
+			{Target: "bar", Type: "implements", Strength: 0.7},
+		},
+		Tags:       []string{"a", "A", "b"}, // case-insensitive dup
+		Provenance: schema.Provenance{Sources: []string{"s1", "s1"}},
+	}
+
+	result := MergeFrontmatter(existing, extracted, MergeOptions{Force: true})
+
+	assert.Len(t, result.Relationships, 2, "duplicate (foo, related-to) must collapse")
+	assert.Equal(t, "foo", result.Relationships[0].Target)
+	assert.Equal(t, 0.5, result.Relationships[0].Strength, "first-seen wins on exact dup")
+	assert.Equal(t, "bar", result.Relationships[1].Target)
+	assert.Equal(t, []string{"a", "b"}, result.Tags)
+	assert.Equal(t, []string{"s1"}, result.Provenance.Sources)
+}
+
+// TestMergeFrontmatter_ForceDedupesEntities guards AC #4 from issue #108:
+// entities carried through existing frontmatter into a force-mode merge must
+// be deduped by lowercased Name. Mirrors TestMergeFrontmatter_ForceDedupesInput
+// on the entities side — ExtractedFields has no Entities field, so the stale
+// duplicates come in via existing.
+func TestMergeFrontmatter_ForceDedupesEntities(t *testing.T) {
+	existing := schema.GraphFrontmatter{
+		ID:         "prev",
+		Title:      "Prev",
+		EntityType: "concept",
+		Confidence: 0.9,
+		Entities: []schema.Entity{
+			{Name: "Alice", Role: "person"},
+			{Name: "alice", Role: "person"}, // case-insensitive dup
+			{Name: "Bob", Role: "person"},
+			{Name: "Bob", Role: "person"}, // exact dup
+		},
+	}
+	extracted := ExtractedFields{
+		ID:    "new",
+		Title: "New",
+	}
+
+	result := MergeFrontmatter(existing, extracted, MergeOptions{Force: true})
+
+	assert.Len(t, result.Entities, 2, "case-insensitive and exact entity dupes must collapse")
+	assert.Equal(t, "Alice", result.Entities[0].Name, "first-seen wins")
+	assert.Equal(t, "Bob", result.Entities[1].Name)
+}
+
+// TestMergeFrontmatter_DefaultDedupesEntities covers the non-force path: if
+// existing frontmatter already carries entity duplicates (e.g. from a prior
+// buggy write), a default merge must clean them up rather than preserve them.
+func TestMergeFrontmatter_DefaultDedupesEntities(t *testing.T) {
+	existing := schema.GraphFrontmatter{
+		Entities: []schema.Entity{
+			{Name: "Alice"},
+			{Name: "ALICE"},
+			{Name: "Bob"},
+		},
+	}
+	extracted := ExtractedFields{ID: "p", Title: "P"}
+
+	result := MergeFrontmatter(existing, extracted, MergeOptions{})
+
+	assert.Len(t, result.Entities, 2)
+	assert.Equal(t, "Alice", result.Entities[0].Name)
+	assert.Equal(t, "Bob", result.Entities[1].Name)
+}
+
+// TestMergeFrontmatter_IdempotentAcrossModes asserts the issue #108
+// single-block invariant: repeated merges of the same extracted payload
+// never grow the relationships / entities / tags lists, in either default
+// or force mode.
+func TestMergeFrontmatter_IdempotentAcrossModes(t *testing.T) {
+	extracted := ExtractedFields{
+		ID:         "p",
+		Title:      "P",
+		EntityType: "concept",
+		Confidence: 0.9,
+		Tags:       []string{"go"},
+		Relationships: []schema.Relationship{
+			{Target: "foo", Type: "related-to", Strength: 0.5},
+			{Target: "bar", Type: "implements", Strength: 0.7},
+		},
+	}
+
+	// Two passes in default (non-force) mode.
+	r1 := MergeFrontmatter(schema.GraphFrontmatter{}, extracted, MergeOptions{})
+	r2 := MergeFrontmatter(r1, extracted, MergeOptions{})
+	assert.Equal(t, r1.Relationships, r2.Relationships, "non-force merge must be idempotent")
+	assert.Equal(t, r1.Tags, r2.Tags)
+
+	// Two passes in force mode, input seeded with within-list dups.
+	dupExtracted := extracted
+	dupExtracted.Relationships = append(dupExtracted.Relationships,
+		schema.Relationship{Target: "foo", Type: "related-to", Strength: 0.5})
+	f1 := MergeFrontmatter(schema.GraphFrontmatter{}, dupExtracted, MergeOptions{Force: true})
+	f2 := MergeFrontmatter(f1, dupExtracted, MergeOptions{Force: true})
+	assert.Len(t, f1.Relationships, 2)
+	assert.Equal(t, f1.Relationships, f2.Relationships, "force merge must be idempotent after dedup")
+}
+
+// TestMergeModelResult_ForceDedupesInput mirrors the above guard on the
+// Tier 2 MergeModelResult force branch, which was the other path that could
+// write within-list duplicates into frontmatter under issue #108.
+func TestMergeModelResult_ForceDedupesInput(t *testing.T) {
+	existing := schema.GraphFrontmatter{}
+	model := &ModelResult{
+		Entities: []schema.Entity{
+			{Name: "Alice", Role: "person"},
+			{Name: "alice", Role: "person"}, // case-insensitive dup
+			{Name: "Bob", Role: "person"},
+		},
+		Relationships: []schema.Relationship{
+			{Target: "x", Type: "related-to", Strength: 0.5},
+			{Target: "x", Type: "related-to", Strength: 0.5}, // exact dup
+		},
+		SemanticHints:     []string{"h1", "h1"},
+		PossibleQuestions: []string{"q1", "Q1"},
+	}
+
+	result := MergeModelResult(existing, model, MergeOptions{Force: true})
+
+	assert.Len(t, result.Entities, 2)
+	assert.Equal(t, "Alice", result.Entities[0].Name)
+	assert.Equal(t, "Bob", result.Entities[1].Name)
+	assert.Len(t, result.Relationships, 1)
+	assert.Len(t, result.SemanticHints, 1)
+	assert.Len(t, result.PossibleQuestions, 1)
 }
