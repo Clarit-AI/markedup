@@ -278,6 +278,75 @@ func TestEnrichPage_ReturnedPageIsDeepCopy(t *testing.T) {
 	}
 }
 
+// Direct coverage for EnrichPageWithModel's deep-copy-on-return contract,
+// symmetric to TestEnrichPage_ReturnedPageIsDeepCopy. Both entry points
+// share cloneFrontmatter, but the contract is documented on both and
+// deserves its own assertion.
+func TestEnrichPageWithModel_ReturnedPageIsDeepCopy(t *testing.T) {
+	page := &schema.Page{
+		Frontmatter: schema.GraphFrontmatter{
+			Entities:          []schema.Entity{{Name: "Alice", Aliases: []string{"A"}}},
+			SemanticHints:     []string{"hint"},
+			PossibleQuestions: []string{"who?"},
+			Tags:              []string{"tag"},
+		},
+		Body:       "body",
+		SourcePath: "/tmp/p.md",
+	}
+
+	inputSnapshot := schema.GraphFrontmatter{
+		Entities:          []schema.Entity{{Name: "Alice", Aliases: []string{"A"}}},
+		SemanticHints:     []string{"hint"},
+		PossibleQuestions: []string{"who?"},
+		Tags:              []string{"tag"},
+	}
+
+	model := &ModelResult{
+		Entities:          []schema.Entity{{Name: "Bob", Role: "editor"}},
+		SemanticHints:     []string{"another hint"},
+		PossibleQuestions: []string{"what?"},
+	}
+
+	enriched, _ := EnrichPageWithModel(page, model, "summary", MergeOptions{})
+
+	// Mutate every slice on the returned frontmatter.
+	if len(enriched.Frontmatter.Tags) > 0 {
+		enriched.Frontmatter.Tags[0] = "MUTATED"
+	}
+	if len(enriched.Frontmatter.SemanticHints) > 0 {
+		enriched.Frontmatter.SemanticHints[0] = "MUTATED"
+	}
+	if len(enriched.Frontmatter.PossibleQuestions) > 0 {
+		enriched.Frontmatter.PossibleQuestions[0] = "MUTATED"
+	}
+	if len(enriched.Frontmatter.Entities) > 0 {
+		enriched.Frontmatter.Entities[0].Name = "MUTATED"
+		if len(enriched.Frontmatter.Entities[0].Aliases) > 0 {
+			enriched.Frontmatter.Entities[0].Aliases[0] = "MUTATED"
+		}
+	}
+
+	// Input slices must be unchanged.
+	if !reflect.DeepEqual(page.Frontmatter.Tags, inputSnapshot.Tags) {
+		t.Errorf("Tags mutated: got %v, want %v", page.Frontmatter.Tags, inputSnapshot.Tags)
+	}
+	if !reflect.DeepEqual(page.Frontmatter.SemanticHints, inputSnapshot.SemanticHints) {
+		t.Errorf("SemanticHints mutated: got %v, want %v",
+			page.Frontmatter.SemanticHints, inputSnapshot.SemanticHints)
+	}
+	if !reflect.DeepEqual(page.Frontmatter.PossibleQuestions, inputSnapshot.PossibleQuestions) {
+		t.Errorf("PossibleQuestions mutated: got %v, want %v",
+			page.Frontmatter.PossibleQuestions, inputSnapshot.PossibleQuestions)
+	}
+	if page.Frontmatter.Entities[0].Name != "Alice" {
+		t.Errorf("Entity.Name mutated: got %q", page.Frontmatter.Entities[0].Name)
+	}
+	if !reflect.DeepEqual(page.Frontmatter.Entities[0].Aliases, inputSnapshot.Entities[0].Aliases) {
+		t.Errorf("Entity.Aliases mutated: got %v, want %v",
+			page.Frontmatter.Entities[0].Aliases, inputSnapshot.Entities[0].Aliases)
+	}
+}
+
 func TestEnrichPage_PreservesBodyAndSourcePath(t *testing.T) {
 	page := &schema.Page{
 		Frontmatter: schema.GraphFrontmatter{},
