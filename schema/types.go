@@ -20,7 +20,7 @@ type GraphFrontmatter struct {
 	// from Relationships so that graph traversal (which expects doc→doc edges)
 	// only consumes wikilink-derived Relationships. Omitted from YAML output
 	// when empty. See issue #109.
-	SemanticRelationships []Relationship `yaml:"semantic-relationships,omitempty" json:"semantic-relationships,omitempty"`
+	SemanticRelationships []Relationship `yaml:"semantic-relationships,omitempty"`
 	Temporal              TemporalInfo   `yaml:"temporal"`
 	Provenance            Provenance     `yaml:"provenance"`
 	Summary               string         `yaml:"summary"`
