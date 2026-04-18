@@ -3,7 +3,7 @@ package enrich
 import (
 	"strings"
 
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/schema"
 )
 
 // EnrichmentDelta describes what changed when enriching a page. It lets

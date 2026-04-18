@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/KHAEntertainment/markedup/index"
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/index"
+	"github.com/Clarit-AI/markedup/schema"
 )
 
 // marshalJSON is a convenience wrapper around json.MarshalIndent.

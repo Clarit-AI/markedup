@@ -3,7 +3,7 @@ package enrich
 import (
 	"strings"
 
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/schema"
 )
 
 // MergeOptions controls how fields are merged.

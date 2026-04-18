@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/schema"
 	"gopkg.in/yaml.v3"
 )
 

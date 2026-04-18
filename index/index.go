@@ -6,7 +6,7 @@ package index
 import (
 	"sort"
 
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/schema"
 )
 
 // KnowledgeIndex is the core read-only index over all parsed pages. It is

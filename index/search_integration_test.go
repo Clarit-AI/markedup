@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/KHAEntertainment/markedup/embed"
-	"github.com/KHAEntertainment/markedup/rerank"
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/embed"
+	"github.com/Clarit-AI/markedup/rerank"
+	"github.com/Clarit-AI/markedup/schema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

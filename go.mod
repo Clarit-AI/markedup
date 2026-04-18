@@ -1,4 +1,4 @@
-module github.com/KHAEntertainment/markedup
+module github.com/Clarit-AI/markedup
 
 go 1.25.0
 

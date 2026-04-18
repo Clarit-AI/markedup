@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/KHAEntertainment/markedup/config"
+	"github.com/Clarit-AI/markedup/config"
 )
 
 func TestNewWizardModel_InitialState(t *testing.T) {

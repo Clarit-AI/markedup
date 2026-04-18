@@ -8,7 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
 
-	"github.com/KHAEntertainment/markedup/config"
+	"github.com/Clarit-AI/markedup/config"
 )
 
 // Run launches the setup wizard and returns the completed config.

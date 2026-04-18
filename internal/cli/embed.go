@@ -9,10 +9,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/KHAEntertainment/markedup/cache"
-	"github.com/KHAEntertainment/markedup/embed"
-	"github.com/KHAEntertainment/markedup/index"
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/cache"
+	"github.com/Clarit-AI/markedup/embed"
+	"github.com/Clarit-AI/markedup/index"
+	"github.com/Clarit-AI/markedup/schema"
 	"github.com/spf13/cobra"
 )
 

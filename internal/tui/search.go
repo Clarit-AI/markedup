@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/KHAEntertainment/markedup/index"
+	"github.com/Clarit-AI/markedup/index"
 )
 
 const debounceInterval = 150 * time.Millisecond

@@ -7,8 +7,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/KHAEntertainment/markedup/index"
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/index"
+	"github.com/Clarit-AI/markedup/schema"
 )
 
 // neighborEntry represents one item in the explore list.

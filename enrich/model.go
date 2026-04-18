@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/KHAEntertainment/markedup/llm"
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/llm"
+	"github.com/Clarit-AI/markedup/schema"
 )
 
 // ModelFormat selects the prompt/parse strategy for Extract().

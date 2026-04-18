@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/schema"
 )
 
 // ExtractedFields holds fields extracted from document structure.

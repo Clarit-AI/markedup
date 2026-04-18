@@ -1,7 +1,7 @@
 # Architecture
 
 ## Repository Info
-- **Repo URL**: https://github.com/KHAEntertainment/markedup
+- **Repo URL**: https://github.com/Clarit-AI/markedup
 - **Main branch**: main
 - **Created**: 2026-04-12
 
@@ -11,7 +11,7 @@
 - **YAML**: gopkg.in/yaml.v3
 - **Test framework**: testing + testify
 - **Concurrency**: golang.org/x/sync/errgroup
-- **Module path**: github.com/KHAEntertainment/markedup
+- **Module path**: github.com/Clarit-AI/markedup
 
 ## Architecture Decisions
 - **No database**: in-memory index built from filesystem scan

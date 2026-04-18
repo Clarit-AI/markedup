@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/KHAEntertainment/markedup/index"
-	"github.com/KHAEntertainment/markedup/schema"
+	"github.com/Clarit-AI/markedup/index"
+	"github.com/Clarit-AI/markedup/schema"
 )
 
 // buildTestIndex constructs a minimal KnowledgeIndex for testing.

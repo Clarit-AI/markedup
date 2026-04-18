@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/KHAEntertainment/markedup/cache"
-	"github.com/KHAEntertainment/markedup/embed"
-	"github.com/KHAEntertainment/markedup/index"
-	"github.com/KHAEntertainment/markedup/rerank"
+	"github.com/Clarit-AI/markedup/cache"
+	"github.com/Clarit-AI/markedup/embed"
+	"github.com/Clarit-AI/markedup/index"
+	"github.com/Clarit-AI/markedup/rerank"
 	"github.com/spf13/cobra"
 )
 

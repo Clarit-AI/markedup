@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/KHAEntertainment/markedup/config"
+	"github.com/Clarit-AI/markedup/config"
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
