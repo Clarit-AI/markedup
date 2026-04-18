@@ -418,7 +418,72 @@ func TestMergeModelResult_ForceDedupesInput(t *testing.T) {
 	assert.Len(t, result.Entities, 2)
 	assert.Equal(t, "Alice", result.Entities[0].Name)
 	assert.Equal(t, "Bob", result.Entities[1].Name)
-	assert.Len(t, result.Relationships, 1)
+	// Tier 2 relationships route into SemanticRelationships (issue #109).
+	assert.Empty(t, result.Relationships, "Tier 2 must not write to Relationships")
+	assert.Len(t, result.SemanticRelationships, 1)
 	assert.Len(t, result.SemanticHints, 1)
 	assert.Len(t, result.PossibleQuestions, 1)
+}
+
+// TestMergeFrontmatter_Tier1_RoutesToRelationships guards the Tier 1 path: wikilink-
+// derived ExtractedFields.Relationships must remain in Relationships and must
+// NOT bleed into SemanticRelationships. Issue #109.
+func TestMergeFrontmatter_Tier1_RoutesToRelationships(t *testing.T) {
+	existing := schema.GraphFrontmatter{}
+	extracted := ExtractedFields{
+		Relationships: []schema.Relationship{
+			{Target: "other-doc", Type: "related-to", Strength: 0.5},
+		},
+	}
+
+	// Both default and force branches must route identically.
+	for _, force := range []bool{false, true} {
+		result := MergeFrontmatter(existing, extracted, MergeOptions{Force: force})
+		assert.Len(t, result.Relationships, 1, "force=%v", force)
+		assert.Equal(t, "other-doc", result.Relationships[0].Target)
+		assert.Empty(t, result.SemanticRelationships, "Tier 1 must not populate SemanticRelationships; force=%v", force)
+	}
+}
+
+// TestMergeModelResult_Tier2_PreservesExistingRelationships ensures Tier 2
+// running after Tier 1 does NOT clobber wikilink Relationships. Issue #109.
+func TestMergeModelResult_Tier2_PreservesExistingRelationships(t *testing.T) {
+	existing := schema.GraphFrontmatter{
+		Relationships: []schema.Relationship{
+			{Target: "doc-a", Type: "related-to", Strength: 0.5},
+		},
+	}
+	model := &ModelResult{
+		Relationships: []schema.Relationship{
+			{Target: "wikilinks", Type: "mentions", Strength: 0.8},
+		},
+	}
+
+	for _, force := range []bool{false, true} {
+		result := MergeModelResult(existing, model, MergeOptions{Force: force})
+		assert.Len(t, result.Relationships, 1, "wikilink edge preserved; force=%v", force)
+		assert.Equal(t, "doc-a", result.Relationships[0].Target)
+		assert.Len(t, result.SemanticRelationships, 1, "NER edge routed; force=%v", force)
+		assert.Equal(t, "wikilinks", result.SemanticRelationships[0].Target)
+	}
+}
+
+// TestMergeModelResult_SemanticRelationships_Idempotent ensures running Tier 2
+// merge twice produces stable counts on SemanticRelationships (mirror of the
+// #108 dedup invariant, but on the new field). Issue #109.
+func TestMergeModelResult_SemanticRelationships_Idempotent(t *testing.T) {
+	existing := schema.GraphFrontmatter{}
+	model := &ModelResult{
+		Relationships: []schema.Relationship{
+			{Target: "alice", Type: "mentions", Strength: 0.8},
+			{Target: "bob", Type: "mentions", Strength: 0.8},
+		},
+	}
+
+	for _, force := range []bool{false, true} {
+		pass1 := MergeModelResult(existing, model, MergeOptions{Force: force})
+		pass2 := MergeModelResult(pass1, model, MergeOptions{Force: force})
+		assert.Len(t, pass1.SemanticRelationships, 2, "force=%v", force)
+		assert.Len(t, pass2.SemanticRelationships, 2, "idempotent; force=%v", force)
+	}
 }

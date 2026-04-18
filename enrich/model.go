@@ -358,8 +358,11 @@ func MergeModelResult(existing schema.GraphFrontmatter, model *ModelResult, opts
 		if len(model.Entities) > 0 {
 			result.Entities = dedupeEntities(model.Entities)
 		}
+		// Tier 2 NER edges go into SemanticRelationships — see issue #109.
+		// result.Relationships (wikilink-derived, doc→doc) is left untouched
+		// so graph traversal stays clean.
 		if len(model.Relationships) > 0 {
-			result.Relationships = dedupeRelationships(model.Relationships)
+			result.SemanticRelationships = dedupeRelationships(model.Relationships)
 		}
 		if len(model.SemanticHints) > 0 {
 			result.SemanticHints = dedupeStringsCaseInsensitive(model.SemanticHints)
@@ -402,8 +405,9 @@ func MergeModelResult(existing schema.GraphFrontmatter, model *ModelResult, opts
 		result.Entities = merged
 	}
 
-	// Union relationships by target.
-	result.Relationships = unionRelationships(result.Relationships, model.Relationships)
+	// Tier 2 NER edges union into SemanticRelationships — see issue #109.
+	// result.Relationships (wikilink-derived, doc→doc) is left untouched.
+	result.SemanticRelationships = unionRelationships(result.SemanticRelationships, model.Relationships)
 
 	// Union semantic hints.
 	result.SemanticHints = unionStrings(result.SemanticHints, model.SemanticHints)

@@ -358,7 +358,9 @@ func TestMergeModelResult_Default(t *testing.T) {
 
 	assert.Equal(t, "document", result.EntityType) // preserved
 	assert.Len(t, result.Entities, 2)              // Go + Rust
-	assert.Len(t, result.Relationships, 1)
+	// Tier 2 relationships route into SemanticRelationships (issue #109).
+	assert.Empty(t, result.Relationships, "Tier 2 must not write to Relationships")
+	assert.Len(t, result.SemanticRelationships, 1)
 	assert.Equal(t, []string{"systems programming"}, result.SemanticHints)
 	assert.Equal(t, []string{"What is Go?"}, result.PossibleQuestions)
 }

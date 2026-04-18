@@ -112,8 +112,8 @@ func TestGraphFrontmatter_YAMLRoundTrip(t *testing.T) {
 			want: GraphFrontmatter{
 				ID:         "edge-zero",
 				Confidence: 0.0,
-				Tags:              []string{},
-				Entities:          []Entity{},
+				Tags:       []string{},
+				Entities:   []Entity{},
 				Relationships: []Relationship{
 					{Target: "t", Type: "x", Strength: 0.0},
 				},
@@ -136,8 +136,8 @@ func TestGraphFrontmatter_YAMLRoundTrip(t *testing.T) {
 			want: GraphFrontmatter{
 				ID:         "edge-one",
 				Confidence: 1.0,
-				Tags:              []string{},
-				Entities:          []Entity{},
+				Tags:       []string{},
+				Entities:   []Entity{},
 				Relationships: []Relationship{
 					{Target: "t", Type: "x", Strength: 1.0},
 				},
@@ -230,6 +230,52 @@ func TestGraphFrontmatter_YAMLRoundTrip(t *testing.T) {
 			require.Equal(t, tt.want, got, "round-trip should produce expected struct")
 		})
 	}
+}
+
+// TestGraphFrontmatter_SemanticRelationships_RoundTrip verifies the new
+// semantic-relationships field (issue #109) marshals and unmarshals cleanly.
+// omitempty means an empty slice produces no YAML key at all.
+func TestGraphFrontmatter_SemanticRelationships_RoundTrip(t *testing.T) {
+	t.Run("populated semantic-relationships round-trip", func(t *testing.T) {
+		give := GraphFrontmatter{
+			ID: "ner-page",
+			Relationships: []Relationship{
+				{Target: "other-doc", Type: "related-to", Strength: 0.5},
+			},
+			SemanticRelationships: []Relationship{
+				{Target: "wikilinks", Type: "mentions", Strength: 0.8},
+				{Target: "bob", Type: "knows", Strength: 0.7},
+			},
+		}
+		got := yamlRoundTrip(t, give)
+		require.Equal(t, give.Relationships, got.Relationships)
+		require.Equal(t, give.SemanticRelationships, got.SemanticRelationships)
+	})
+
+	t.Run("omitempty: absent key unmarshals as nil", func(t *testing.T) {
+		give := GraphFrontmatter{ID: "no-ner"}
+		data, err := yaml.Marshal(give)
+		require.NoError(t, err)
+		// omitempty: key must not appear when slice is empty.
+		require.NotContains(t, string(data), "semantic-relationships")
+
+		var got GraphFrontmatter
+		require.NoError(t, yaml.Unmarshal(data, &got))
+		require.Nil(t, got.SemanticRelationships)
+	})
+
+	t.Run("both fields independent", func(t *testing.T) {
+		// Relationships populated, SemanticRelationships empty.
+		give := GraphFrontmatter{
+			ID: "wikilinks-only",
+			Relationships: []Relationship{
+				{Target: "doc-a", Type: "links", Strength: 1.0},
+			},
+		}
+		got := yamlRoundTrip(t, give)
+		require.Len(t, got.Relationships, 1)
+		require.Empty(t, got.SemanticRelationships)
+	})
 }
 
 func TestGraphFrontmatter_YAMLIdempotent(t *testing.T) {
