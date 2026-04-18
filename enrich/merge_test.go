@@ -311,6 +311,56 @@ func TestMergeFrontmatter_ForceDedupesInput(t *testing.T) {
 	assert.Equal(t, []string{"s1"}, result.Provenance.Sources)
 }
 
+// TestMergeFrontmatter_ForceDedupesEntities guards AC #4 from issue #108:
+// entities carried through existing frontmatter into a force-mode merge must
+// be deduped by lowercased Name. Mirrors TestMergeFrontmatter_ForceDedupesInput
+// on the entities side — ExtractedFields has no Entities field, so the stale
+// duplicates come in via existing.
+func TestMergeFrontmatter_ForceDedupesEntities(t *testing.T) {
+	existing := schema.GraphFrontmatter{
+		ID:         "prev",
+		Title:      "Prev",
+		EntityType: "concept",
+		Confidence: 0.9,
+		Entities: []schema.Entity{
+			{Name: "Alice", Role: "person"},
+			{Name: "alice", Role: "person"}, // case-insensitive dup
+			{Name: "Bob", Role: "person"},
+			{Name: "Bob", Role: "person"}, // exact dup
+		},
+	}
+	extracted := ExtractedFields{
+		ID:    "new",
+		Title: "New",
+	}
+
+	result := MergeFrontmatter(existing, extracted, MergeOptions{Force: true})
+
+	assert.Len(t, result.Entities, 2, "case-insensitive and exact entity dupes must collapse")
+	assert.Equal(t, "Alice", result.Entities[0].Name, "first-seen wins")
+	assert.Equal(t, "Bob", result.Entities[1].Name)
+}
+
+// TestMergeFrontmatter_DefaultDedupesEntities covers the non-force path: if
+// existing frontmatter already carries entity duplicates (e.g. from a prior
+// buggy write), a default merge must clean them up rather than preserve them.
+func TestMergeFrontmatter_DefaultDedupesEntities(t *testing.T) {
+	existing := schema.GraphFrontmatter{
+		Entities: []schema.Entity{
+			{Name: "Alice"},
+			{Name: "ALICE"},
+			{Name: "Bob"},
+		},
+	}
+	extracted := ExtractedFields{ID: "p", Title: "P"}
+
+	result := MergeFrontmatter(existing, extracted, MergeOptions{})
+
+	assert.Len(t, result.Entities, 2)
+	assert.Equal(t, "Alice", result.Entities[0].Name)
+	assert.Equal(t, "Bob", result.Entities[1].Name)
+}
+
 // TestMergeFrontmatter_IdempotentAcrossModes asserts the issue #108
 // single-block invariant: repeated merges of the same extracted payload
 // never grow the relationships / entities / tags lists, in either default

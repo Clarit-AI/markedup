@@ -37,6 +37,14 @@ func MergeFrontmatter(existing schema.GraphFrontmatter, extracted ExtractedField
 		if len(extracted.Relationships) > 0 {
 			result.Relationships = dedupeRelationships(extracted.Relationships)
 		}
+		// ExtractedFields carries no Entities of its own — Tier 1 is relationship-
+		// and tag-focused — but existing.Entities flows through the force branch
+		// unchanged. Dedupe it so a previously-written stale duplicate on the
+		// entities list gets cleaned up on the next force enrich. Mirrors the
+		// relationships dedup above (issue #108 AC #4).
+		if len(result.Entities) > 0 {
+			result.Entities = dedupeEntities(result.Entities)
+		}
 		if len(extracted.Provenance.Sources) > 0 {
 			result.Provenance.Sources = dedupeStringsCaseInsensitive(extracted.Provenance.Sources)
 		}
@@ -61,6 +69,12 @@ func MergeFrontmatter(existing schema.GraphFrontmatter, extracted ExtractedField
 	}
 	if result.Provenance.CreatedBy == "" {
 		result.Provenance.CreatedBy = extracted.Provenance.CreatedBy
+	}
+
+	// Dedupe entities flowing through from existing. ExtractedFields carries
+	// no Entities, but existing may contain stale duplicates (issue #108 AC #4).
+	if len(result.Entities) > 0 {
+		result.Entities = dedupeEntities(result.Entities)
 	}
 
 	// Union tags (case-insensitive dedup).
