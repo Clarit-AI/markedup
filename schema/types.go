@@ -8,18 +8,24 @@ package schema
 // graph page. It captures identity, classification, relationships, temporal
 // metadata, and provenance for a single node in the graph.
 type GraphFrontmatter struct {
-	ID                string         `yaml:"id"`
-	Title             string         `yaml:"title"`
-	EntityType        string         `yaml:"entity-type"`
-	Confidence        float64        `yaml:"confidence"`
-	Tags              []string       `yaml:"tags"`
-	Entities          []Entity       `yaml:"entities"`
-	Relationships     []Relationship `yaml:"relationships"`
-	Temporal          TemporalInfo   `yaml:"temporal"`
-	Provenance        Provenance     `yaml:"provenance"`
-	Summary           string         `yaml:"summary"`
-	SemanticHints     []string       `yaml:"semantic-hints"`
-	PossibleQuestions []string       `yaml:"possible-questions"`
+	ID            string         `yaml:"id"`
+	Title         string         `yaml:"title"`
+	EntityType    string         `yaml:"entity-type"`
+	Confidence    float64        `yaml:"confidence"`
+	Tags          []string       `yaml:"tags"`
+	Entities      []Entity       `yaml:"entities"`
+	Relationships []Relationship `yaml:"relationships"`
+	// SemanticRelationships holds Tier 2 NER-derived edges whose Target is a
+	// free-text entity name rather than a document ID. These are kept separate
+	// from Relationships so that graph traversal (which expects doc→doc edges)
+	// only consumes wikilink-derived Relationships. Omitted from YAML output
+	// when empty. See issue #109.
+	SemanticRelationships []Relationship `yaml:"semantic-relationships,omitempty"`
+	Temporal              TemporalInfo   `yaml:"temporal"`
+	Provenance            Provenance     `yaml:"provenance"`
+	Summary               string         `yaml:"summary"`
+	SemanticHints         []string       `yaml:"semantic-hints"`
+	PossibleQuestions     []string       `yaml:"possible-questions"`
 }
 
 // Entity represents a named entity referenced within a page. Aliases allow
