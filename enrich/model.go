@@ -356,16 +356,16 @@ func MergeModelResult(existing schema.GraphFrontmatter, model *ModelResult, opts
 			result.Summary = model.Summary
 		}
 		if len(model.Entities) > 0 {
-			result.Entities = model.Entities
+			result.Entities = dedupeEntities(model.Entities)
 		}
 		if len(model.Relationships) > 0 {
-			result.Relationships = model.Relationships
+			result.Relationships = dedupeRelationships(model.Relationships)
 		}
 		if len(model.SemanticHints) > 0 {
-			result.SemanticHints = model.SemanticHints
+			result.SemanticHints = dedupeStringsCaseInsensitive(model.SemanticHints)
 		}
 		if len(model.PossibleQuestions) > 0 {
-			result.PossibleQuestions = model.PossibleQuestions
+			result.PossibleQuestions = dedupeStringsCaseInsensitive(model.PossibleQuestions)
 		}
 		return result
 	}
@@ -378,18 +378,28 @@ func MergeModelResult(existing schema.GraphFrontmatter, model *ModelResult, opts
 		result.Summary = model.Summary
 	}
 
-	// Union entities by name.
-	if len(model.Entities) > 0 {
-		seen := make(map[string]bool)
+	// Union entities by name (case-insensitive), also deduping existing
+	// against itself so stale duplicates on the input side get cleaned up.
+	if len(result.Entities) > 0 || len(model.Entities) > 0 {
+		seen := make(map[string]bool, len(result.Entities)+len(model.Entities))
+		merged := make([]schema.Entity, 0, len(result.Entities)+len(model.Entities))
 		for _, e := range result.Entities {
-			seen[strings.ToLower(e.Name)] = true
+			k := strings.ToLower(e.Name)
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			merged = append(merged, e)
 		}
 		for _, e := range model.Entities {
-			if !seen[strings.ToLower(e.Name)] {
-				seen[strings.ToLower(e.Name)] = true
-				result.Entities = append(result.Entities, e)
+			k := strings.ToLower(e.Name)
+			if seen[k] {
+				continue
 			}
+			seen[k] = true
+			merged = append(merged, e)
 		}
+		result.Entities = merged
 	}
 
 	// Union relationships by target.
