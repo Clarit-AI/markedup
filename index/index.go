@@ -12,10 +12,11 @@ import (
 // KnowledgeIndex is the core read-only index over all parsed pages. It is
 // built by Load (or Import) and is never mutated by its own methods.
 //
-// Concurrency: all read methods (Get, All, Pages, Entities, Relationships,
-// Tags, ByTag, ForwardRels, ReverseRefs, Export, CompactGraphSummary,
-// Search, Traverse) are safe for concurrent use from multiple goroutines
-// **provided callers do not mutate the values they return**. Get and All
+// Concurrency: the read methods (Get, All, Pages, Entities, Relationships,
+// Tags, ByTag, ForwardRels, ReverseRefs, Export, CompactGraphSummary) and
+// the package-level APIs that take *KnowledgeIndex (Search, Traverse) are
+// safe for concurrent use from multiple goroutines **provided callers do
+// not mutate the values they return**. Get and All
 // hand out *schema.Page pointers into the internal map; ByTag, ForwardRels,
 // and ReverseRefs return the internal slices directly. Mutating any of
 // these would be observable by other readers. Treat everything the index

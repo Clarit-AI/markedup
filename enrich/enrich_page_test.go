@@ -168,6 +168,48 @@ func TestEnrichPage_RelationshipBodyChangeIsDetected(t *testing.T) {
 	}
 }
 
+// Entity body-only replacement (same Name, different Role/Aliases) must be
+// detected via EntitiesModified. This mirrors the relationship body-change
+// case and is the class of bug that slipped past EntitiesAdded/Removed alone.
+func TestEnrichPage_EntityBodyChangeIsDetected(t *testing.T) {
+	before := schema.GraphFrontmatter{
+		ID:         "x",
+		Title:      "X",
+		EntityType: "document",
+		Confidence: 0.9,
+		Entities: []schema.Entity{
+			{Name: "Alice", Role: "person", Aliases: []string{"A"}},
+		},
+	}
+	after := schema.GraphFrontmatter{
+		ID:         "x",
+		Title:      "X",
+		EntityType: "document",
+		Confidence: 0.9,
+		Entities: []schema.Entity{
+			{Name: "Alice", Role: "author", Aliases: []string{"Al"}},
+		},
+	}
+
+	delta := computeDelta(before, after)
+
+	if !delta.Changed {
+		t.Fatal("expected delta.Changed=true when entity body differs")
+	}
+	if len(delta.EntitiesModified) != 1 {
+		t.Fatalf("expected 1 modified entity, got %d: %+v",
+			len(delta.EntitiesModified), delta.EntitiesModified)
+	}
+	if delta.EntitiesModified[0].Role != "author" {
+		t.Errorf("expected modified entity to carry post-merge Role, got %q",
+			delta.EntitiesModified[0].Role)
+	}
+	if len(delta.EntitiesAdded) != 0 || len(delta.EntitiesRemoved) != 0 {
+		t.Errorf("expected no add/remove for same-name change; got add=%v remove=%v",
+			delta.EntitiesAdded, delta.EntitiesRemoved)
+	}
+}
+
 // Deep-copy semantics: mutating the returned frontmatter must not affect
 // the input. Addresses Codex review Must-Fix #2.
 func TestEnrichPage_ReturnedPageIsDeepCopy(t *testing.T) {

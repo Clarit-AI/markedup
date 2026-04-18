@@ -37,7 +37,8 @@ type EnrichmentDelta struct {
 	SummaryChanged    bool
 
 	// Collection additions/removals. Added/Removed are symmetric; Modified
-	// captures relationship body changes with the same Target.
+	// captures body changes where the identity key (Target for
+	// relationships, Name for entities) is present on both sides.
 	TagsAdded             []string
 	TagsRemoved           []string
 	RelationshipsAdded    []schema.Relationship
@@ -47,6 +48,7 @@ type EnrichmentDelta struct {
 	SourcesRemoved        []string
 	EntitiesAdded         []schema.Entity
 	EntitiesRemoved       []schema.Entity
+	EntitiesModified      []schema.Entity
 	SemanticHintsAdded    []string
 	SemanticHintsRemoved  []string
 	QuestionsAdded        []string
@@ -142,7 +144,8 @@ func computeDelta(before, after schema.GraphFrontmatter) EnrichmentDelta {
 	d.RelationshipsAdded, d.RelationshipsRemoved, d.RelationshipsModified =
 		diffRelationships(before.Relationships, after.Relationships)
 
-	d.EntitiesAdded, d.EntitiesRemoved = diffEntities(before.Entities, after.Entities)
+	d.EntitiesAdded, d.EntitiesRemoved, d.EntitiesModified =
+		diffEntities(before.Entities, after.Entities)
 
 	d.Changed = d.IDChanged || d.TitleChanged || d.EntityTypeChanged ||
 		d.ConfidenceChanged || d.CreatedByChanged || d.SummaryChanged ||
@@ -152,7 +155,8 @@ func computeDelta(before, after schema.GraphFrontmatter) EnrichmentDelta {
 		len(d.QuestionsAdded) > 0 || len(d.QuestionsRemoved) > 0 ||
 		len(d.RelationshipsAdded) > 0 || len(d.RelationshipsRemoved) > 0 ||
 		len(d.RelationshipsModified) > 0 ||
-		len(d.EntitiesAdded) > 0 || len(d.EntitiesRemoved) > 0
+		len(d.EntitiesAdded) > 0 || len(d.EntitiesRemoved) > 0 ||
+		len(d.EntitiesModified) > 0
 
 	return d
 }
@@ -190,6 +194,12 @@ func diffStringsCaseInsensitive(before, after []string) (added, removed []string
 // This mirrors unionRelationships in merge.go (which dedupes by Target) and
 // additionally detects the force-mode case where MergeFrontmatter replaces
 // the entire slice.
+//
+// Invariant: Target is assumed unique within each input slice, matching
+// the invariant unionRelationships relies on. If duplicates are present
+// the later occurrence wins in the lookup maps; cardinality changes
+// between duplicated targets may therefore be underreported. Enforcement
+// of this invariant is upstream in the merge logic.
 func diffRelationships(before, after []schema.Relationship) (added, removed, modified []schema.Relationship) {
 	beforeByTarget := make(map[string]schema.Relationship, len(before))
 	for _, r := range before {
@@ -215,19 +225,30 @@ func diffRelationships(before, after []schema.Relationship) (added, removed, mod
 	return added, removed, modified
 }
 
-// diffEntities returns (added, removed) compared by Name.
-func diffEntities(before, after []schema.Entity) (added, removed []schema.Entity) {
-	beforeByName := make(map[string]struct{}, len(before))
+// diffEntities categorizes entities into (added, removed, modified),
+// comparing identity by Name. Modified entities are those whose Name is
+// present on both sides but whose Role or Aliases differ. This catches
+// force-mode replacements like Alice{Role:"person"} -> Alice{Role:"author"}
+// that Added/Removed alone would miss.
+//
+// Invariant: entity Name is assumed unique within each input slice.
+// Duplicate Names follow the same "last wins" behavior as
+// diffRelationships and rely on upstream merge logic for enforcement.
+func diffEntities(before, after []schema.Entity) (added, removed, modified []schema.Entity) {
+	beforeByName := make(map[string]schema.Entity, len(before))
 	for _, e := range before {
-		beforeByName[e.Name] = struct{}{}
+		beforeByName[e.Name] = e
 	}
-	afterByName := make(map[string]struct{}, len(after))
+	afterByName := make(map[string]schema.Entity, len(after))
 	for _, e := range after {
-		afterByName[e.Name] = struct{}{}
+		afterByName[e.Name] = e
 	}
+
 	for _, e := range after {
-		if _, ok := beforeByName[e.Name]; !ok {
+		if prev, ok := beforeByName[e.Name]; !ok {
 			added = append(added, e)
+		} else if !entityBodyEqual(prev, e) {
+			modified = append(modified, e)
 		}
 	}
 	for _, e := range before {
@@ -235,7 +256,24 @@ func diffEntities(before, after []schema.Entity) (added, removed []schema.Entity
 			removed = append(removed, e)
 		}
 	}
-	return added, removed
+	return added, removed, modified
+}
+
+// entityBodyEqual returns true iff two entities with the same Name also
+// share identical Role and Aliases (order-sensitive).
+func entityBodyEqual(a, b schema.Entity) bool {
+	if a.Role != b.Role {
+		return false
+	}
+	if len(a.Aliases) != len(b.Aliases) {
+		return false
+	}
+	for i := range a.Aliases {
+		if a.Aliases[i] != b.Aliases[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // cloneFrontmatter returns a deep copy of the given GraphFrontmatter. All
