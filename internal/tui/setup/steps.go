@@ -457,7 +457,7 @@ func (p providerStep) View(width int) string {
 const triplexModelName = "Phi-3-mini-128k-instruct/triplex"
 
 // triplexDescription explains what Triplex does and why it is optional.
-const triplexDescription = "Triplex extracts entities and relationships from your notes to build a\nrich knowledge graph. It is optional but highly recommended — without it,\nmarkedup uses your general LLM for extraction (lower quality).\n\nTriplex is a Phi-3-mini-128k-instruct fine-tune and runs locally via Ollama\nor a compatible OpenAI-compatible endpoint. The default model name is\npre-filled but can be edited if your host uses a different identifier."
+const triplexDescription = "Configure a structured extractor to build a knowledge graph from your notes.\nOptional but recommended — without it, markedup uses your general LLM (lower quality).\n\nSupported models:\n  • Triplex (default) — Phi-3-mini-128k-instruct fine-tune, emits KG triples\n  • NuExtract-2.0 (8B / 2B) — template-based extraction, runs on GGUF/vLLM/HF\n\nEnter any OpenAI-compatible endpoint. To use NuExtract, set the model name to\n\"numind/NuExtract-2.0-8B\" or \"numind/NuExtract-2.0-2B\" — the wizard auto-detects\nthe format from the model id and writes the correct config section."
 
 // triplexStep is the wizard sub-model for configuring the Triplex extraction model.
 // The model name defaults to triplexModelName but can be edited by the user.
@@ -609,7 +609,7 @@ func (t triplexStep) Update(msg tea.Msg) (triplexStep, tea.Cmd) {
 func (t triplexStep) View(width int) string {
 	var b strings.Builder
 
-	b.WriteString(headerStyle.Width(width).Render("Triple Extraction (Triplex)"))
+	b.WriteString(headerStyle.Width(width).Render("Structured Extractor"))
 	b.WriteString("\n\n")
 	b.WriteString(triplexDescription)
 	b.WriteString("\n\n")
@@ -670,7 +670,8 @@ func newKeysStep(
 	needEmbed bool, embedLabel, embedEndpoint string,
 	needLLM bool, llmLabel, llmEndpoint string,
 	needRerank bool, rerankLabel, rerankEndpoint string,
-	needTriplex bool, triplexLabel, triplexEndpoint string,
+	needExtractor bool, extractorLabel, extractorEndpoint string,
+	extractorService string, // "triplex" or "nuextract" — keyring + collectedKeys service name
 ) keysStep {
 	type svcInfo struct {
 		service  string
@@ -688,8 +689,12 @@ func newKeysStep(
 	if needRerank {
 		candidates = append(candidates, svcInfo{"rerank", rerankLabel, rerankEndpoint})
 	}
-	if needTriplex {
-		candidates = append(candidates, svcInfo{"triplex", triplexLabel, triplexEndpoint})
+	if needExtractor {
+		svc := extractorService
+		if svc == "" {
+			svc = "triplex"
+		}
+		candidates = append(candidates, svcInfo{svc, extractorLabel, extractorEndpoint})
 	}
 
 	// Deduplicate by endpoint. The first service to claim an endpoint becomes
@@ -938,13 +943,26 @@ func (c confirmStep) View(width int) string {
 		b.WriteString("\n")
 	}
 
-	// Triplex.
-	b.WriteString(labelStyle.Render("Triplex:"))
-	b.WriteString("\n")
-	if c.cfg.Triplex.Endpoint != "" {
+	// Extractor — show Triplex or NuExtract based on which is populated.
+	switch {
+	case c.cfg.NuExtract.Endpoint != "":
+		b.WriteString(labelStyle.Render("Extractor:"))
+		b.WriteString("\n")
+		b.WriteString(fmt.Sprintf("  Format:   NuExtract-2.0\n"))
+		b.WriteString(fmt.Sprintf("  URL:      %s\n", c.cfg.NuExtract.Endpoint))
+		b.WriteString(fmt.Sprintf("  Model:    %s\n", c.cfg.NuExtract.Model))
+		if c.cfg.NuExtract.Mode != "" {
+			b.WriteString(fmt.Sprintf("  Mode:     %s\n", c.cfg.NuExtract.Mode))
+		}
+	case c.cfg.Triplex.Endpoint != "":
+		b.WriteString(labelStyle.Render("Extractor:"))
+		b.WriteString("\n")
+		b.WriteString(fmt.Sprintf("  Format:   Triplex\n"))
 		b.WriteString(fmt.Sprintf("  URL:      %s\n", c.cfg.Triplex.Endpoint))
 		b.WriteString(fmt.Sprintf("  Model:    %s\n", c.cfg.Triplex.Model))
-	} else {
+	default:
+		b.WriteString(labelStyle.Render("Extractor:"))
+		b.WriteString("\n")
 		b.WriteString(mutedStyle.Render("  not configured (using LLM for extraction)"))
 		b.WriteString("\n")
 	}

@@ -194,13 +194,13 @@ func TestProviderStep_RerankFormat(t *testing.T) {
 }
 
 func TestKeysStep_NoKeys(t *testing.T) {
-	ks := newKeysStep(false, "", "", false, "", "", false, "", "", false, "", "")
+	ks := newKeysStep(false, "", "", false, "", "", false, "", "", false, "", "", "")
 	ks, _ = ks.Update(nil)
 	assert.True(t, ks.done)
 }
 
 func TestKeysStep_WithKeys(t *testing.T) {
-	ks := newKeysStep(true, "Ollama", "http://localhost:11434", false, "", "", false, "", "", false, "", "")
+	ks := newKeysStep(true, "Ollama", "http://localhost:11434", false, "", "", false, "", "", false, "", "", "")
 	assert.Len(t, ks.entries, 1)
 	assert.Equal(t, "embed", ks.entries[0].service)
 }
@@ -306,7 +306,7 @@ func TestWizardModel_View_AllSteps(t *testing.T) {
 		case 4:
 			m.triplex = newTriplexStep(nil)
 		case 5:
-			m.keys = newKeysStep(true, "Ollama", "http://localhost:11434", false, "", "", false, "", "", false, "", "")
+			m.keys = newKeysStep(true, "Ollama", "http://localhost:11434", false, "", "", false, "", "", false, "", "", "")
 		case 6:
 			m.confirm = newConfirmStep(m.config, "", nil)
 		}
@@ -413,7 +413,8 @@ func TestTriplexStep_CursorNavigation(t *testing.T) {
 func TestTriplexStep_View(t *testing.T) {
 	ts := newTriplexStep(nil)
 	view := ts.View(80)
-	assert.Contains(t, view, "Triple Extraction (Triplex)")
+	assert.Contains(t, view, "Structured Extractor")
+	assert.Contains(t, view, "NuExtract-2.0")
 	assert.Contains(t, view, "Model:")
 	assert.Contains(t, view, triplexModelName, "editable model input should show default")
 	assert.Contains(t, view, "Skip")
@@ -532,7 +533,7 @@ func TestTriplexStep_SInEndpointInput_PassesThrough(t *testing.T) {
 
 func TestKeysStep_PrefilledFlag(t *testing.T) {
 	// Create a keysStep and manually simulate pre-fill.
-	ks := newKeysStep(true, "OpenRouter", "https://openrouter.ai/api", false, "", "", false, "", "", false, "", "")
+	ks := newKeysStep(true, "OpenRouter", "https://openrouter.ai/api", false, "", "", false, "", "", false, "", "", "")
 	assert.Len(t, ks.entries, 1)
 
 	// Manually set prefilled (since we can't use real keyring in tests).
@@ -547,7 +548,7 @@ func TestKeysStep_PrefilledFlag(t *testing.T) {
 }
 
 func TestKeysStep_PrefilledView(t *testing.T) {
-	ks := newKeysStep(true, "OpenRouter", "https://openrouter.ai/api", false, "", "", false, "", "", false, "", "")
+	ks := newKeysStep(true, "OpenRouter", "https://openrouter.ai/api", false, "", "", false, "", "", false, "", "", "")
 	ks.entries[0].prefilled = true
 
 	view := ks.View(80)
@@ -556,7 +557,7 @@ func TestKeysStep_PrefilledView(t *testing.T) {
 }
 
 func TestKeysStep_PrefilledOverwrite(t *testing.T) {
-	ks := newKeysStep(true, "OpenRouter", "https://openrouter.ai/api", false, "", "", false, "", "", false, "", "")
+	ks := newKeysStep(true, "OpenRouter", "https://openrouter.ai/api", false, "", "", false, "", "", false, "", "", "")
 	ks.entries[0].prefilled = true
 	ks.inputs[0].SetValue("sk-old-key")
 	ks.collectedKeys["embed"] = "sk-old-key"
@@ -571,7 +572,7 @@ func TestKeysStep_PrefilledOverwrite(t *testing.T) {
 }
 
 func TestKeysStep_NoPrefillNote_WhenNoPrefill(t *testing.T) {
-	ks := newKeysStep(true, "OpenRouter", "https://openrouter.ai/api", false, "", "", false, "", "", false, "", "")
+	ks := newKeysStep(true, "OpenRouter", "https://openrouter.ai/api", false, "", "", false, "", "", false, "", "", "")
 
 	view := ks.View(80)
 	assert.NotContains(t, view, "Existing API keys found", "should not show pre-fill note when no keys pre-filled")
@@ -592,4 +593,126 @@ func TestProviderStep_CursorBounds(t *testing.T) {
 		ps, _ = ps.Update(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	assert.Equal(t, len(ps.choices)-1, ps.cursor)
+}
+
+func TestWizard_TriplexModel_WritesToTriplexConfig(t *testing.T) {
+	m := NewWizardModel()
+	m.triplex = triplexStep{
+		selected: config.ServiceConfig{
+			Endpoint: "http://localhost:11434",
+			Model:    "Phi-3-mini-128k-instruct/triplex",
+		},
+		done: true,
+	}
+	m.step = 4
+	updated, _ := m.updateTriplex(tea.KeyMsg{})
+	final, ok := updated.(WizardModel)
+	require.True(t, ok)
+	assert.Equal(t, "http://localhost:11434", final.config.Triplex.Endpoint)
+	assert.Empty(t, final.config.NuExtract.Endpoint, "Triplex model should not populate NuExtract config")
+	assert.Empty(t, final.config.Format, "Triplex model should not set Format explicitly")
+}
+
+func TestWizard_NuExtractModel_WritesToNuExtractConfig(t *testing.T) {
+	m := NewWizardModel()
+	m.triplex = triplexStep{
+		selected: config.ServiceConfig{
+			Endpoint: "https://xyz.hf.space",
+			Model:    "numind/NuExtract-2.0-8B",
+		},
+		done: true,
+	}
+	m.step = 4
+	updated, _ := m.updateTriplex(tea.KeyMsg{})
+	final, ok := updated.(WizardModel)
+	require.True(t, ok)
+	assert.Equal(t, "https://xyz.hf.space", final.config.NuExtract.Endpoint)
+	assert.Equal(t, "numind/NuExtract-2.0-8B", final.config.NuExtract.Model)
+	assert.Equal(t, "nuextract", final.config.Format)
+	assert.Empty(t, final.config.Triplex.Endpoint, "NuExtract model should not populate Triplex config")
+}
+
+func TestWizard_SwitchExtractor_NuExtractThenTriplex_ClearsStaleNuExtract(t *testing.T) {
+	m := NewWizardModel()
+	// Simulate prior NuExtract run leaving state.
+	m.config.NuExtract = config.NuExtractConfig{
+		ServiceConfig: config.ServiceConfig{Endpoint: "https://old.nx.space", Model: "numind/NuExtract-2.0-8B"},
+	}
+	m.config.Format = "nuextract"
+
+	// User re-runs wizard and picks Triplex.
+	m.triplex = triplexStep{
+		selected: config.ServiceConfig{Endpoint: "http://localhost:11434", Model: "Phi-3-mini-128k-instruct/triplex"},
+		done:     true,
+	}
+	m.step = 4
+	updated, _ := m.updateTriplex(tea.KeyMsg{})
+	final := updated.(WizardModel)
+
+	assert.Equal(t, "http://localhost:11434", final.config.Triplex.Endpoint)
+	assert.Empty(t, final.config.NuExtract.Endpoint, "stale NuExtract endpoint should be cleared")
+	assert.Empty(t, final.config.NuExtract.Model, "stale NuExtract model should be cleared")
+	assert.Empty(t, final.config.Format, "Format should reset when switching to Triplex")
+	assert.Equal(t, "triplex", final.extractorService)
+}
+
+func TestWizard_SwitchExtractor_TriplexThenNuExtract_ClearsStaleTriplex(t *testing.T) {
+	m := NewWizardModel()
+	m.config.Triplex = config.ServiceConfig{Endpoint: "http://old.triplex", Model: "phi3"}
+
+	m.triplex = triplexStep{
+		selected: config.ServiceConfig{Endpoint: "https://hf.space", Model: "numind/NuExtract-2.0-8B"},
+		done:     true,
+	}
+	m.step = 4
+	updated, _ := m.updateTriplex(tea.KeyMsg{})
+	final := updated.(WizardModel)
+
+	assert.Empty(t, final.config.Triplex.Endpoint, "stale Triplex endpoint should be cleared")
+	assert.Equal(t, "https://hf.space", final.config.NuExtract.Endpoint)
+	assert.Equal(t, "nuextract", final.config.Format)
+	assert.Equal(t, "nuextract", final.extractorService)
+}
+
+func TestWizard_SkipExtractor_ClearsBoth(t *testing.T) {
+	m := NewWizardModel()
+	m.config.Triplex = config.ServiceConfig{Endpoint: "http://old.triplex"}
+	m.config.NuExtract = config.NuExtractConfig{
+		ServiceConfig: config.ServiceConfig{Endpoint: "http://old.nuextract"},
+	}
+	m.config.Format = "triplex"
+
+	m.triplex = triplexStep{skip: true, done: true}
+	m.step = 4
+	updated, _ := m.updateTriplex(tea.KeyMsg{})
+	final := updated.(WizardModel)
+
+	assert.Empty(t, final.config.Triplex.Endpoint, "skip should clear Triplex")
+	assert.Empty(t, final.config.NuExtract.Endpoint, "skip should clear NuExtract")
+	assert.Empty(t, final.config.Format, "skip should reset Format")
+	assert.Empty(t, final.extractorService)
+}
+
+func TestNewKeysStep_NuExtractService(t *testing.T) {
+	ks := newKeysStep(
+		false, "", "",
+		false, "", "",
+		false, "", "",
+		true, "NuExtract-2.0", "https://hf.space",
+		"nuextract",
+	)
+	require.Len(t, ks.entries, 1)
+	assert.Equal(t, "nuextract", ks.entries[0].service, "extractor service should be nuextract when passed")
+}
+
+func TestNewKeysStep_TriplexServiceDefault(t *testing.T) {
+	ks := newKeysStep(
+		false, "", "",
+		false, "", "",
+		false, "", "",
+		true, "Triplex", "http://localhost:11434",
+		"triplex",
+	)
+	require.Len(t, ks.entries, 1)
+	assert.Equal(t, "triplex", ks.entries[0].service)
 }
