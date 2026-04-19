@@ -102,10 +102,56 @@ func MergeSummary(existing schema.GraphFrontmatter, summary string, opts MergeOp
 	return result
 }
 
-// IsComplete reports whether the frontmatter has all required fields populated,
-// meaning enrichment would be a no-op in default (non-force) mode for scalars.
+// Tier identifies a stage of the enrichment pipeline.
+//
+// Tier 1 is the deterministic pass that fills scalar identity fields from
+// filename/headings/wikilinks. Tier 2 is the model-assisted pass that fills
+// semantic fields (summary, entities, semantic-relationships, etc.).
+type Tier int
+
+const (
+	// Tier1 is the deterministic scalar-identity pass.
+	Tier1 Tier = 1
+	// Tier2 is the model-assisted semantic pass.
+	Tier2 Tier = 2
+)
+
+// IsComplete reports whether the frontmatter has both Tier 1 and Tier 2
+// enrichment applied, meaning a non-force re-run would be a no-op.
+//
+// Before the #113 fix this returned true for Tier 1 scalars alone, which
+// caused re-runs under a newly-configured Tier 2 model to skip every file.
+// Callers that only care about a specific tier should use IsCompleteForTier.
 func IsComplete(fm schema.GraphFrontmatter) bool {
+	return tier1Complete(fm) && tier2Complete(fm)
+}
+
+// IsCompleteForTier reports whether the frontmatter has the fields produced
+// by the given tier populated. Unknown tiers return false.
+func IsCompleteForTier(fm schema.GraphFrontmatter, tier Tier) bool {
+	switch tier {
+	case Tier1:
+		return tier1Complete(fm)
+	case Tier2:
+		return tier2Complete(fm)
+	default:
+		return false
+	}
+}
+
+// tier1Complete checks that the deterministic scalar-identity fields are set.
+func tier1Complete(fm schema.GraphFrontmatter) bool {
 	return fm.ID != "" && fm.Title != "" && fm.EntityType != "" && fm.Confidence > 0
+}
+
+// tier2Complete checks for a reliable Tier 2 "ran at all" signal.
+//
+// Summary is used as the anchor because the Tier 2 path in the enrich CLI
+// always generates one, whereas entities/relationships/semantic-relationships
+// can legitimately be empty for a doc that genuinely has none — keying on
+// those would force a redundant re-run on every enrich invocation.
+func tier2Complete(fm schema.GraphFrontmatter) bool {
+	return fm.Summary != ""
 }
 
 // unionStrings returns the union of a and b, case-insensitive, preserving order.

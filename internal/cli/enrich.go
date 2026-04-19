@@ -231,8 +231,17 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		// Skip if complete and not forcing.
-		if enrich.IsComplete(page.Frontmatter) && !enrichForce {
+		// Skip if complete for all configured tiers and not forcing. When no
+		// model is configured, Tier 2 fields are unreachable, so we must only
+		// require Tier 1 completeness — otherwise idempotent re-runs would
+		// re-process every file on every invocation.
+		var complete bool
+		if modelExtractor != nil {
+			complete = enrich.IsComplete(page.Frontmatter)
+		} else {
+			complete = enrich.IsCompleteForTier(page.Frontmatter, enrich.Tier1)
+		}
+		if complete && !enrichForce {
 			results = append(results, enrichResult{Path: filePath, Status: "skipped", Reason: "already complete"})
 			skipped++
 			continue

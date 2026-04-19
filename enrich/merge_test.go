@@ -242,26 +242,48 @@ func TestMergeSummary_EmptySummaryNoOp(t *testing.T) {
 }
 
 func TestIsComplete(t *testing.T) {
+	// Post-#113 semantics: IsComplete requires BOTH Tier 1 scalars AND Tier 2
+	// summary. Tier-1-only frontmatter now correctly reports incomplete so a
+	// re-run under a newly-configured Tier 2 model will process the file.
 	tests := []struct {
 		name string
 		fm   schema.GraphFrontmatter
 		want bool
 	}{
 		{
-			name: "complete",
+			name: "both tiers complete",
 			fm: schema.GraphFrontmatter{
 				ID: "x", Title: "X", EntityType: "doc", Confidence: 0.7,
+				Summary: "A summary.",
 			},
 			want: true,
 		},
 		{
+			name: "tier 1 only (the #113 bug)",
+			fm: schema.GraphFrontmatter{
+				ID: "x", Title: "X", EntityType: "doc", Confidence: 0.7,
+			},
+			want: false,
+		},
+		{
+			name: "tier 2 only (missing scalars)",
+			fm: schema.GraphFrontmatter{
+				Summary: "A summary.",
+			},
+			want: false,
+		},
+		{
 			name: "missing id",
-			fm:   schema.GraphFrontmatter{Title: "X", EntityType: "doc", Confidence: 0.7},
+			fm: schema.GraphFrontmatter{
+				Title: "X", EntityType: "doc", Confidence: 0.7, Summary: "s",
+			},
 			want: false,
 		},
 		{
 			name: "zero confidence",
-			fm:   schema.GraphFrontmatter{ID: "x", Title: "X", EntityType: "doc"},
+			fm: schema.GraphFrontmatter{
+				ID: "x", Title: "X", EntityType: "doc", Summary: "s",
+			},
 			want: false,
 		},
 		{
@@ -274,6 +296,39 @@ func TestIsComplete(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, IsComplete(tt.fm))
+		})
+	}
+}
+
+func TestIsCompleteForTier(t *testing.T) {
+	tier1Only := schema.GraphFrontmatter{
+		ID: "x", Title: "X", EntityType: "doc", Confidence: 0.7,
+	}
+	tier2Only := schema.GraphFrontmatter{Summary: "s"}
+	both := schema.GraphFrontmatter{
+		ID: "x", Title: "X", EntityType: "doc", Confidence: 0.7, Summary: "s",
+	}
+	empty := schema.GraphFrontmatter{}
+
+	tests := []struct {
+		name string
+		fm   schema.GraphFrontmatter
+		tier Tier
+		want bool
+	}{
+		{"tier1 on tier1-only", tier1Only, Tier1, true},
+		{"tier2 on tier1-only", tier1Only, Tier2, false},
+		{"tier1 on tier2-only", tier2Only, Tier1, false},
+		{"tier2 on tier2-only", tier2Only, Tier2, true},
+		{"tier1 on both", both, Tier1, true},
+		{"tier2 on both", both, Tier2, true},
+		{"tier1 on empty", empty, Tier1, false},
+		{"tier2 on empty", empty, Tier2, false},
+		{"unknown tier", both, Tier(99), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsCompleteForTier(tt.fm, tt.tier))
 		})
 	}
 }
