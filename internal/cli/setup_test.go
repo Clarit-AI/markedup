@@ -98,7 +98,9 @@ func TestSetup_CloudProvider_SavesConfig(t *testing.T) {
 	assert.Equal(t, "https://openrouter.ai/api", savedCfg.Embed.Endpoint)
 	assert.Equal(t, "text-embedding-3", savedCfg.Embed.Model)
 	assert.Equal(t, "/tmp/test-markedup.yaml", savedPath)
-	assert.Equal(t, "sk-test-embed-key", storedKeys["embed-api-key"])
+	// Issue #117: keys are stored under the endpoint hash, not the service name.
+	expectedKeyName := config.KeyNameForEndpoint("https://openrouter.ai/api")
+	assert.Equal(t, "sk-test-embed-key", storedKeys[expectedKeyName])
 }
 
 func TestSetup_DetectedLocal(t *testing.T) {

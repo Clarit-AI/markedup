@@ -3,11 +3,29 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
 
 const configFileName = ".markedup.yaml"
+
+// migrateOnce gates the one-time legacy-key migration per process. markedup
+// is a single-user CLI, so process-local serialization is sufficient;
+// cross-process races between concurrently launched CLIs are possible but
+// deemed acceptable — MigrateLegacyKeys is itself idempotent and safe to
+// re-run, so the worst case is a duplicated read/no-op cycle, never data loss.
+//
+// Hydration is intentionally NOT gated by Once: each Load() call may receive
+// a different cfg with different endpoints, so the keyring lookup must run
+// every time.
+var migrateOnce sync.Once
+
+// resetMigrateOnceForTest re-arms migrateOnce so each test's Load() invocation
+// re-runs migration against a freshly-stubbed keyring backend.
+func resetMigrateOnceForTest() {
+	migrateOnce = sync.Once{}
+}
 
 // GlobalPath returns the path to the global config file (~/.markedup.yaml).
 func GlobalPath() string {
@@ -47,6 +65,20 @@ func Load(kbDir string) (*Config, error) {
 
 	cfg := mergeConfigs(global, local)
 	applyEnvOverrides(cfg)
+
+	// One-time-per-process migration of legacy per-service keyring entries
+	// to the endpoint-keyed format (issue #117). MigrateLegacyKeys is itself
+	// idempotent; the sync.Once just avoids redundant keyring reads when a
+	// long-lived process calls Load() multiple times.
+	migrateOnce.Do(func() {
+		MigrateLegacyKeys(cfg)
+	})
+
+	// Hydrate any APIKey fields still empty (env vars / YAML did not provide
+	// one) from the keyring, looked up by endpoint. Same endpoint = one read.
+	// Runs every Load — different kbDirs may yield different endpoints.
+	hydrateKeysFromKeyring(cfg)
+
 	return cfg, nil
 }
 

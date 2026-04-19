@@ -724,20 +724,36 @@ func newKeysStep(
 		}
 	}
 
-	// Check keyring for existing keys and pre-fill.
+	// Check keyring for existing keys and pre-fill. Issue #117: lookups are
+	// now keyed by endpoint, so two services pointing at the same provider
+	// share a single keyring read.
 	hasExisting := false
 	collectedKeys := make(map[string]string)
 	if config.KeyringAvailable() {
+		cache := map[string]string{}
 		for i := range entries {
-			keyName := entries[i].service + "-api-key"
-			if existing, err := config.GetKey(keyName); err == nil && existing != "" {
-				entries[i].prefilled = true
-				hasExisting = true
-				// Pre-populate collectedKeys so Enter without changes keeps the key.
-				collectedKeys[entries[i].service] = existing
-				for _, svc := range entries[i].services {
-					collectedKeys[svc] = existing
+			keyName := config.KeyNameForEndpoint(entries[i].endpoint)
+			if keyName == "" {
+				continue
+			}
+			existing, ok := cache[keyName]
+			if !ok {
+				v, err := config.GetKey(keyName)
+				if err != nil {
+					continue
 				}
+				existing = v
+				cache[keyName] = v
+			}
+			if existing == "" {
+				continue
+			}
+			entries[i].prefilled = true
+			hasExisting = true
+			// Pre-populate collectedKeys so Enter without changes keeps the key.
+			collectedKeys[entries[i].service] = existing
+			for _, svc := range entries[i].services {
+				collectedKeys[svc] = existing
 			}
 		}
 	}

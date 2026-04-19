@@ -390,14 +390,31 @@ func (m WizardModel) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 
-				// Store API keys in keyring.
+				// Store API keys in keyring, one entry per unique endpoint
+				// (issue #117). Iterate the deduped keysStep.entries rather
+				// than collectedKeys so a shared endpoint produces a single
+				// keyring write.
 				if config.KeyringAvailable() {
-					for svc, key := range m.keys.collectedKeys {
-						keyName := svc + "-api-key"
+					written := map[string]bool{}
+					for _, entry := range m.keys.entries {
+						key, ok := m.keys.collectedKeys[entry.service]
+						if !ok || key == "" {
+							continue
+						}
+						keyName := config.KeyNameForEndpoint(entry.endpoint)
+						if keyName == "" {
+							// No endpoint configured — skip silently; the
+							// caller can still set the key via env var.
+							continue
+						}
+						if written[keyName] {
+							continue
+						}
 						if err := config.StoreKey(keyName, key); err != nil {
-							m.confirm.err = fmt.Errorf("failed to store %s key: %w", svc, err)
+							m.confirm.err = fmt.Errorf("failed to store %s key: %w", entry.service, err)
 							return m, nil
 						}
+						written[keyName] = true
 					}
 				}
 
