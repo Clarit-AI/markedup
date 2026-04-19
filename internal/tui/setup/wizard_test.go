@@ -761,3 +761,252 @@ func TestNewKeysStep_DedupesByEndpoint_Issue117(t *testing.T) {
 	}
 	assert.Len(t, written, 1, "issue #117: exactly one keyring write per shared endpoint")
 }
+
+// ---------------------------------------------------------------------------
+// Reconfigure-mode tests (issues #115 + #116)
+// ---------------------------------------------------------------------------
+
+func sampleCurrentConfig() *config.Config {
+	return &config.Config{
+		Embed: config.ServiceConfig{Endpoint: "http://localhost:11434", Model: "nomic-embed-text"},
+		LLM:   config.ServiceConfig{Endpoint: "https://openrouter.ai/api", Model: "openai/gpt-4o-mini"},
+		Rerank: config.RerankConfig{
+			ServiceConfig: config.ServiceConfig{Endpoint: "https://api.openai.com", Model: "rerank-v1"},
+			Format:        "openai",
+		},
+		Triplex: config.ServiceConfig{Endpoint: "http://localhost:11434", Model: "Phi-3-mini-128k-instruct/triplex"},
+	}
+}
+
+func TestProviderStepWithCurrent_PreFillsModelAndCursorOnDetected(t *testing.T) {
+	detected := []config.Endpoint{
+		{Name: "Ollama", URL: "http://localhost:11434", Type: "multi", Models: []string{"nomic-embed-text"}},
+	}
+	current := config.ServiceConfig{Endpoint: "http://localhost:11434", Model: "nomic-embed-text"}
+
+	ps := newProviderStepWithCurrent("Embed", "", detected, "embed", false, false, current)
+
+	// Cursor should land on the detected endpoint that matches the current config.
+	assert.Equal(t, "detected", ps.choices[ps.cursor].kind)
+	assert.Equal(t, "http://localhost:11434", ps.choices[ps.cursor].endpoint)
+	// Model input should be pre-seeded with the current model.
+	assert.Equal(t, "nomic-embed-text", ps.modelIn.Value())
+	assert.Equal(t, "nomic-embed-text", ps.selected.Model)
+}
+
+func TestProviderStepWithCurrent_PreFillsCloudPreset(t *testing.T) {
+	current := config.ServiceConfig{Endpoint: "https://openrouter.ai/api", Model: "openai/gpt-4o-mini"}
+
+	ps := newProviderStepWithCurrent("LLM", "", nil, "llm", false, false, current)
+
+	assert.Equal(t, "cloud", ps.choices[ps.cursor].kind)
+	assert.Equal(t, "https://openrouter.ai/api", ps.choices[ps.cursor].endpoint)
+	assert.Equal(t, "openai/gpt-4o-mini", ps.modelIn.Value())
+}
+
+func TestProviderStepWithCurrent_FallsBackToCustomForUnknownEndpoint(t *testing.T) {
+	current := config.ServiceConfig{Endpoint: "https://my.private.host/v1", Model: "custom-model"}
+
+	ps := newProviderStepWithCurrent("LLM", "", nil, "llm", false, false, current)
+
+	assert.Equal(t, "custom", ps.choices[ps.cursor].kind, "unknown endpoint should land on Custom")
+	// Endpoint input should be pre-filled so Enter on Custom shows current value.
+	assert.Equal(t, "https://my.private.host/v1", ps.endpointIn.Value())
+	assert.Equal(t, "custom-model", ps.modelIn.Value())
+}
+
+func TestProviderStepWithCurrent_EmptyCurrentBehavesLikeNewProviderStep(t *testing.T) {
+	psA := newProviderStepWithCurrent("Embed", "", nil, "embed", false, false, config.ServiceConfig{})
+	psB := newProviderStep("Embed", "", nil, "embed", false, false)
+	assert.Equal(t, psB.cursor, psA.cursor)
+	assert.Equal(t, psB.modelIn.Value(), psA.modelIn.Value())
+}
+
+func TestTriplexStepWithCurrent_PreFillsEndpointAndModel(t *testing.T) {
+	current := config.ServiceConfig{Endpoint: "https://api.example.com", Model: "numind/NuExtract-2.0-2B"}
+
+	t2 := newTriplexStepWithCurrent(nil, current)
+
+	assert.Equal(t, "https://api.example.com", t2.endpointIn.Value())
+	assert.Equal(t, "numind/NuExtract-2.0-2B", t2.modelIn.Value())
+}
+
+func TestWizardModel_SetReconfigure_EnablesModeAndCopiesConfig(t *testing.T) {
+	m := NewWizardModel()
+	cfg := sampleCurrentConfig()
+	m.SetReconfigure(cfg)
+
+	assert.True(t, m.Reconfigure())
+	assert.NotNil(t, m.currentConfig)
+	// The working config should be a copy seeded from cfg.
+	assert.Equal(t, cfg.Embed.Endpoint, m.config.Embed.Endpoint)
+	assert.Equal(t, cfg.LLM.Model, m.config.LLM.Model)
+	assert.Equal(t, "openai", m.currentFormat)
+
+	// Mutating the working config must not touch the caller's cfg.
+	m.config.Embed.Endpoint = "mutated"
+	assert.Equal(t, "http://localhost:11434", cfg.Embed.Endpoint)
+}
+
+func TestWizardModel_Reconfigure_WelcomeJumpsToSectionMenu(t *testing.T) {
+	m := NewWizardModel()
+	m.SetReconfigure(sampleCurrentConfig())
+
+	// Finish detection.
+	result, _ := m.Update(detectDoneMsg{endpoints: nil})
+	m = result.(WizardModel)
+
+	// Press Enter — should jump to the section menu, not step 1.
+	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = result.(WizardModel)
+	assert.Equal(t, stepSectionMenu, m.step)
+}
+
+func TestWizardModel_FirstRun_WelcomeStillJumpsToStep1(t *testing.T) {
+	// Regression guard: first-run mode (no SetReconfigure) MUST still go to
+	// the linear walkthrough.
+	m := NewWizardModel()
+
+	result, _ := m.Update(detectDoneMsg{endpoints: nil})
+	m = result.(WizardModel)
+	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = result.(WizardModel)
+	assert.Equal(t, 1, m.step)
+	assert.False(t, m.Reconfigure())
+}
+
+func TestWizardModel_SectionMenu_NavigationAndJump(t *testing.T) {
+	m := NewWizardModel()
+	m.SetReconfigure(sampleCurrentConfig())
+	m.step = stepSectionMenu
+
+	entries := m.sectionMenuEntries()
+	require.GreaterOrEqual(t, len(entries), 5)
+
+	// Down arrow advances cursor.
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = result.(WizardModel)
+	assert.Equal(t, 1, m.sectionCursor)
+
+	// Up arrow goes back.
+	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = result.(WizardModel)
+	assert.Equal(t, 0, m.sectionCursor)
+
+	// Enter on first entry (Embed) jumps to step 1.
+	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = result.(WizardModel)
+	assert.Equal(t, 1, m.step)
+	// And the embed sub-step should be pre-filled from current config.
+	assert.Equal(t, "nomic-embed-text", m.embed.modelIn.Value())
+}
+
+func TestWizardModel_SectionMenu_JumpToEachSection(t *testing.T) {
+	cases := []struct {
+		cursor   int
+		wantStep int
+		check    func(t *testing.T, m WizardModel)
+	}{
+		{0, 1, func(t *testing.T, m WizardModel) {
+			assert.Equal(t, "nomic-embed-text", m.embed.modelIn.Value())
+		}},
+		{1, 2, func(t *testing.T, m WizardModel) {
+			assert.Equal(t, "openai/gpt-4o-mini", m.llm.modelIn.Value())
+		}},
+		{2, 3, func(t *testing.T, m WizardModel) {
+			assert.Equal(t, "rerank-v1", m.rerank.modelIn.Value())
+			// Format should be pre-selected to "openai".
+			assert.Equal(t, "openai", rerankFormats[m.rerank.formatIdx])
+		}},
+		{3, 4, func(t *testing.T, m WizardModel) {
+			assert.Equal(t, "Phi-3-mini-128k-instruct/triplex", m.triplex.modelIn.Value())
+		}},
+		// cursor 4 (API Keys) — for sample config the only remote service is
+		// LLM (OpenRouter) and Rerank (OpenAI), both need keys. Step should
+		// land on 5.
+		{4, 5, func(t *testing.T, m WizardModel) {
+			assert.NotEmpty(t, m.keys.entries)
+		}},
+		{5, 6, func(t *testing.T, m WizardModel) {
+			assert.NotNil(t, m.confirm.cfg)
+		}},
+	}
+
+	for _, tc := range cases {
+		m := NewWizardModel()
+		m.SetReconfigure(sampleCurrentConfig())
+		m.step = stepSectionMenu
+		m.sectionCursor = tc.cursor
+
+		result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		m = result.(WizardModel)
+		assert.Equal(t, tc.wantStep, m.step, "cursor %d should jump to step %d", tc.cursor, tc.wantStep)
+		tc.check(t, m)
+	}
+}
+
+func TestWizardModel_Reconfigure_EscReturnsToSectionMenu(t *testing.T) {
+	m := NewWizardModel()
+	m.SetReconfigure(sampleCurrentConfig())
+	m.step = stepSectionMenu
+
+	// Jump into Embed.
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = result.(WizardModel)
+	require.Equal(t, 1, m.step)
+
+	// Press Esc — should return to section menu (not pop linear history).
+	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = result.(WizardModel)
+	assert.Equal(t, stepSectionMenu, m.step)
+	assert.False(t, m.cancelled)
+}
+
+func TestWizardModel_Reconfigure_EscAtSectionMenuCancels(t *testing.T) {
+	m := NewWizardModel()
+	m.SetReconfigure(sampleCurrentConfig())
+	m.step = stepSectionMenu
+
+	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = result.(WizardModel)
+	assert.True(t, m.cancelled)
+	require.NotNil(t, cmd)
+}
+
+func TestWizardModel_Reconfigure_CompletingSectionReturnsToMenu(t *testing.T) {
+	m := NewWizardModel()
+	m.SetReconfigure(sampleCurrentConfig())
+	m.step = stepSectionMenu
+
+	// Jump to Embed, simulate done, expect return to menu.
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = result.(WizardModel)
+	require.Equal(t, 1, m.step)
+
+	// Force the embed sub-model into a "done" state and re-run the parent update.
+	m.embed.done = true
+	m.embed.selected = config.ServiceConfig{Endpoint: "http://localhost:11434", Model: "nomic-embed-text"}
+	result, _ = m.Update(tea.KeyMsg{Type: tea.KeyMsg{}.Type})
+	m = result.(WizardModel)
+	assert.Equal(t, stepSectionMenu, m.step)
+	assert.Equal(t, "nomic-embed-text", m.config.Embed.Model)
+}
+
+func TestSectionMenu_View_RendersAllEntriesWithSummaries(t *testing.T) {
+	m := NewWizardModel()
+	m.SetReconfigure(sampleCurrentConfig())
+	m.step = stepSectionMenu
+	m.width = 80
+
+	view := m.View()
+	// All section labels present.
+	assert.Contains(t, view, "Embed")
+	assert.Contains(t, view, "LLM")
+	assert.Contains(t, view, "Rerank")
+	assert.Contains(t, view, "Triplex") // because cur.Triplex.Endpoint is set
+	assert.Contains(t, view, "API Keys")
+	assert.Contains(t, view, "Save & Exit")
+	// Current-value summaries appear.
+	assert.Contains(t, view, "nomic-embed-text")
+	assert.Contains(t, view, "openai/gpt-4o-mini")
+}

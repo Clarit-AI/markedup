@@ -3,6 +3,7 @@ package setup
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -38,15 +39,32 @@ func Run() (*config.Config, error) {
 	return wm.config, nil
 }
 
+// stepSectionMenu is the synthetic step index used in reconfigure mode (issues
+// #115/#116) for the jump-to-section menu. It sits between welcome (0) and the
+// concrete edit steps (1..6). Picking a menu entry sets m.step to the chosen
+// edit step; ESC inside an edit step returns here instead of popping back
+// through linear history.
+const stepSectionMenu = 100
+
 // WizardModel is the root BubbleTea model for the 7-step setup wizard.
 type WizardModel struct {
-	step         int   // 0=welcome, 1=embed, 2=llm, 3=rerank, 4=triplex, 5=keys, 6=confirm
+	step         int   // 0=welcome, 1=embed, 2=llm, 3=rerank, 4=triplex, 5=keys, 6=confirm, 100=section menu (reconfigure)
 	stepHistory  []int // stack of previous step indices for Esc back-navigation
 	config       *config.Config
 	detected     []config.Endpoint
 	cancelled    bool
 	width        int
 	height       int
+
+	// Reconfigure mode (issues #115 + #116). Enabled via SetReconfigure when
+	// the wizard is launched from the home Settings menu rather than first-run.
+	// In this mode the welcome/detect step is followed by a section menu
+	// instead of the linear walkthrough; each section reads its initial values
+	// from currentConfig and ESC after editing returns to the menu.
+	reconfigure   bool
+	currentConfig *config.Config
+	currentFormat string // current rerank format (cfg.Rerank.Format) for pre-fill
+	sectionCursor int    // selected entry in the section menu
 
 	// Sub-models for each step.
 	welcome  welcomeStep
@@ -112,6 +130,27 @@ func (m WizardModel) CollectedKeys() map[string]string { return m.keys.collected
 // When embedded, Esc at step 0 sets cancelled without sending tea.Quit.
 func (m *WizardModel) SetEmbedded(v bool) { m.embedded = v }
 
+// SetReconfigure enables reconfigure mode (issues #115 + #116). The wizard
+// will show a jump-to-section menu after the welcome step, pre-filling each
+// step's inputs from cfg. Pass nil cfg to disable. Must be called before Init.
+func (m *WizardModel) SetReconfigure(cfg *config.Config) {
+	if cfg == nil {
+		m.reconfigure = false
+		m.currentConfig = nil
+		return
+	}
+	m.reconfigure = true
+	m.currentConfig = cfg
+	m.currentFormat = cfg.Rerank.Format
+	// Seed the working config so any sections the user does NOT visit retain
+	// their existing values when the wizard saves.
+	cfgCopy := *cfg
+	m.config = &cfgCopy
+}
+
+// Reconfigure returns true when the wizard is in reconfigure mode.
+func (m WizardModel) Reconfigure() bool { return m.reconfigure }
+
 // SetSize sets the width and height for the wizard model.
 func (m *WizardModel) SetSize(w, h int) {
 	m.width = w
@@ -121,6 +160,111 @@ func (m *WizardModel) SetSize(w, h int) {
 // Init implements tea.Model.
 func (m WizardModel) Init() tea.Cmd {
 	return m.welcome.Init()
+}
+
+// viewSectionMenu renders the reconfigure-mode jump-to-section menu (issue
+// #115). Each entry shows the section name plus a one-line summary of the
+// current value so the user can decide what to edit at a glance.
+func (m WizardModel) viewSectionMenu(width int) string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Width(width).Render("Settings — choose a section to edit"))
+	b.WriteString("\n\n")
+	b.WriteString(mutedStyle.Render("Tab/↑↓: navigate  |  Enter: edit section  |  Esc: cancel  |  Ctrl+C: cancel"))
+	b.WriteString("\n\n")
+
+	entries := m.sectionMenuEntries()
+	cur := m.currentConfig
+	if cur == nil {
+		cur = &config.Config{}
+	}
+
+	for i, entry := range entries {
+		prefix := "  "
+		style := subtitleStyle
+		if i == m.sectionCursor {
+			prefix = "> "
+			style = selectedStyle
+		}
+		b.WriteString(style.Render(prefix + entry.label))
+		// Append a one-line current-value summary.
+		summary := ""
+		switch entry.target {
+		case 1:
+			summary = serviceSummary(cur.Embed)
+		case 2:
+			summary = serviceSummary(cur.LLM)
+		case 3:
+			summary = serviceSummary(cur.Rerank.ServiceConfig)
+			if summary != "" && cur.Rerank.Format != "" {
+				summary += "  (" + cur.Rerank.Format + ")"
+			}
+		case 4:
+			switch {
+			case cur.NuExtract.Endpoint != "":
+				summary = serviceSummary(cur.NuExtract.ServiceConfig)
+			case cur.Triplex.Endpoint != "":
+				summary = serviceSummary(cur.Triplex)
+			}
+		case 5:
+			if config.KeyringAvailable() {
+				summary = "stored in OS keychain"
+			} else {
+				summary = "set via env vars"
+			}
+		case 6:
+			summary = "write changes to " + config.GlobalPath()
+		}
+		if summary != "" {
+			b.WriteString("  ")
+			b.WriteString(mutedStyle.Render("— " + summary))
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// serviceSummary returns a compact "model @ endpoint" summary or "(not
+// configured)" when both fields are empty.
+func serviceSummary(s config.ServiceConfig) string {
+	if s.Endpoint == "" && s.Model == "" {
+		return mutedStyle.Render("(not configured)")
+	}
+	if s.Model == "" {
+		return s.Endpoint
+	}
+	if s.Endpoint == "" {
+		return s.Model
+	}
+	return s.Model + " @ " + s.Endpoint
+}
+
+// sectionEntry describes one row in the reconfigure-mode jump-to-section menu.
+type sectionEntry struct {
+	label  string
+	target int // wizard step to jump to
+}
+
+// sectionMenuEntries returns the section list for reconfigure mode. The list
+// adapts to the current config: when an extractor is configured the entry is
+// labeled "NuExtract" or "Triplex"; otherwise "Extractor".
+func (m WizardModel) sectionMenuEntries() []sectionEntry {
+	extractorLabel := "Extractor (NuExtract / Triplex)"
+	if m.currentConfig != nil {
+		switch {
+		case m.currentConfig.NuExtract.Endpoint != "":
+			extractorLabel = "NuExtract"
+		case m.currentConfig.Triplex.Endpoint != "":
+			extractorLabel = "Triplex"
+		}
+	}
+	return []sectionEntry{
+		{label: "Embed", target: 1},
+		{label: "LLM", target: 2},
+		{label: "Rerank", target: 3},
+		{label: extractorLabel, target: 4},
+		{label: "API Keys", target: 5},
+		{label: "Save & Exit", target: 6},
+	}
 }
 
 // Update implements tea.Model.
@@ -163,9 +307,156 @@ func (m WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateKeys(msg)
 	case 6:
 		return m.updateConfirm(msg)
+	case stepSectionMenu:
+		return m.updateSectionMenu(msg)
 	}
 
 	return m, nil
+}
+
+// updateSectionMenu handles input in the reconfigure-mode jump-to-section menu.
+func (m WizardModel) updateSectionMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
+	keyMsg, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	entries := m.sectionMenuEntries()
+	switch keyMsg.String() {
+	case "up", "shift+tab":
+		if m.sectionCursor > 0 {
+			m.sectionCursor--
+		}
+	case "down", "tab":
+		if m.sectionCursor < len(entries)-1 {
+			m.sectionCursor++
+		}
+	case "enter":
+		target := entries[m.sectionCursor].target
+		return m.enterSection(target)
+	}
+	return m, nil
+}
+
+// enterSection initializes the chosen section's sub-model with values pre-
+// filled from m.currentConfig and jumps to it.
+func (m WizardModel) enterSection(target int) (tea.Model, tea.Cmd) {
+	cur := m.currentConfig
+	if cur == nil {
+		cur = &config.Config{}
+	}
+	switch target {
+	case 1: // Embed
+		m.embed = newProviderStepWithCurrent(
+			"Choose a text embedding model",
+			"Converts text to vectors for similarity search\ne.g. nomic-embed-text (local), text-embedding-3-small (OpenAI)",
+			m.detected, "embed", false, false, cur.Embed,
+		)
+		m.step = 1
+		return m, nil
+	case 2: // LLM
+		m.llm = newProviderStepWithCurrent(
+			"LLM Provider",
+			"Choose an LLM endpoint for enrichment and reasoning.\ne.g. granite-3.1-dense:2b (local), gpt-4o-mini (cloud)",
+			m.detected, "llm", false, false, cur.LLM,
+		)
+		m.step = 2
+		return m, nil
+	case 3: // Rerank
+		m.rerank = newProviderStepWithCurrent(
+			"Reranker (optional)",
+			"Configure a reranker model to improve search quality by re-scoring results.\ne.g. bge-reranker-v2-m3 (local TEI), jina-reranker-v2-base-multilingual (cloud)",
+			m.detected, "rerank", true, true, cur.Rerank.ServiceConfig,
+		)
+		// Pre-select the existing rerank format if configured.
+		if m.currentFormat != "" {
+			for i, f := range rerankFormats {
+				if f == m.currentFormat {
+					m.rerank.formatIdx = i
+					break
+				}
+			}
+		}
+		m.step = 3
+		return m, nil
+	case 4: // Extractor
+		// Use whichever extractor block is currently populated; NuExtract takes
+		// precedence (it's the newer config path).
+		var extractorCfg config.ServiceConfig
+		switch {
+		case cur.NuExtract.Endpoint != "":
+			extractorCfg = cur.NuExtract.ServiceConfig
+		case cur.Triplex.Endpoint != "":
+			extractorCfg = cur.Triplex
+		}
+		m.triplex = newTriplexStepWithCurrent(m.detected, extractorCfg)
+		m.step = 4
+		return m, textinput.Blink
+	case 5: // Keys
+		// Keys step needs label/endpoint metadata for each configured service.
+		// Derive from the current config.
+		needEmbed := cur.Embed.Endpoint != "" && needsKeyForEndpoint(cur.Embed.Endpoint)
+		needLLM := cur.LLM.Endpoint != "" && needsKeyForEndpoint(cur.LLM.Endpoint)
+		needRerank := cur.Rerank.Endpoint != "" && needsKeyForEndpoint(cur.Rerank.Endpoint)
+		var extractorEndpoint, extractorService string
+		switch {
+		case cur.NuExtract.Endpoint != "":
+			extractorEndpoint = cur.NuExtract.Endpoint
+			extractorService = "nuextract"
+		case cur.Triplex.Endpoint != "":
+			extractorEndpoint = cur.Triplex.Endpoint
+			extractorService = "triplex"
+		}
+		needExtractor := extractorEndpoint != "" && needsKeyForEndpoint(extractorEndpoint)
+		if !needEmbed && !needLLM && !needRerank && !needExtractor {
+			// Nothing to collect — return immediately to the menu.
+			return m, nil
+		}
+		m.keys = newKeysStep(
+			needEmbed, providerLabelForEndpoint(cur.Embed.Endpoint), cur.Embed.Endpoint,
+			needLLM, providerLabelForEndpoint(cur.LLM.Endpoint), cur.LLM.Endpoint,
+			needRerank, providerLabelForEndpoint(cur.Rerank.Endpoint), cur.Rerank.Endpoint,
+			needExtractor, providerLabelForEndpoint(extractorEndpoint), extractorEndpoint,
+			extractorService,
+		)
+		m.step = 5
+		return m, m.keys.Init()
+	case 6: // Save & Exit (reuse confirm step)
+		format := m.currentFormat
+		if m.config.Rerank.Format != "" {
+			format = m.config.Rerank.Format
+		}
+		// Carry over any keys collected via the Keys section so they get
+		// written to the keyring on save.
+		m.confirm = newConfirmStep(m.config, format, m.keys.collectedKeys)
+		m.step = 6
+		return m, nil
+	}
+	return m, nil
+}
+
+// needsKeyForEndpoint returns true when the endpoint is a remote URL that
+// typically requires an API key (i.e. not localhost/127.0.0.1).
+func needsKeyForEndpoint(endpoint string) bool {
+	if endpoint == "" {
+		return false
+	}
+	lower := strings.ToLower(endpoint)
+	return !strings.Contains(lower, "localhost") && !strings.Contains(lower, "127.0.0.1")
+}
+
+// providerLabelForEndpoint returns a human-readable label for the API key
+// input based on the endpoint URL. Falls back to "Custom" when the URL does
+// not match a known cloud preset.
+func providerLabelForEndpoint(endpoint string) string {
+	for _, c := range cloudProviders {
+		if c.endpoint == endpoint {
+			return c.label
+		}
+	}
+	if endpoint == "" {
+		return "API"
+	}
+	return "Custom"
 }
 
 func (m WizardModel) handleEsc() (tea.Model, tea.Cmd) {
@@ -185,6 +476,22 @@ func (m WizardModel) handleEsc() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	// case 4 (triplex): no sub-phases, fall through to pop history
+	}
+
+	// Reconfigure mode (issue #115): ESC inside an edit step returns to the
+	// section menu. ESC at the section menu cancels back to home.
+	if m.reconfigure {
+		if m.step == stepSectionMenu {
+			m.cancelled = true
+			if m.embedded {
+				return m, nil
+			}
+			return m, tea.Quit
+		}
+		if m.step >= 1 && m.step <= 6 {
+			m.step = stepSectionMenu
+			return m, nil
+		}
 	}
 
 	// Step 0 (welcome): Esc exits cleanly.
@@ -215,6 +522,13 @@ func (m WizardModel) updateWelcome(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle Enter to advance when detection is done.
 	if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "enter" && !m.welcome.detecting {
 		m.detected = m.welcome.detected
+		// Reconfigure mode (issue #115): show jump-to-section menu instead of
+		// the linear walkthrough. First-run flow is unchanged.
+		if m.reconfigure {
+			m.stepHistory = append(m.stepHistory, m.step)
+			m.step = stepSectionMenu
+			return m, nil
+		}
 		m.embed = newProviderStep(
 			"Choose a text embedding model",
 			"Converts text to vectors for similarity search\ne.g. nomic-embed-text (local), text-embedding-3-small (OpenAI)",
@@ -239,6 +553,10 @@ func (m WizardModel) updateEmbed(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.needEmbedKey = m.embed.needsKey
 		m.embedEndpoint = m.embed.selected.Endpoint
 		m.embedProviderLabel = m.embed.selectedProviderLabel()
+		if m.reconfigure {
+			m.step = stepSectionMenu
+			return m, nil
+		}
 		m.llm = newProviderStep(
 			"LLM Provider",
 			"Choose an LLM endpoint for enrichment and reasoning.\ne.g. granite-3.1-dense:2b (local), gpt-4o-mini (cloud)",
@@ -261,6 +579,10 @@ func (m WizardModel) updateLLM(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.needLLMKey = m.llm.needsKey
 		m.llmEndpoint = m.llm.selected.Endpoint
 		m.llmProviderLabel = m.llm.selectedProviderLabel()
+		if m.reconfigure {
+			m.step = stepSectionMenu
+			return m, nil
+		}
 		m.rerank = newProviderStep(
 			"Reranker (optional)",
 			"Configure a reranker model to improve search quality by re-scoring results.\ne.g. bge-reranker-v2-m3 (local TEI), jina-reranker-v2-base-multilingual (cloud)",
@@ -286,6 +608,11 @@ func (m WizardModel) updateRerank(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.needRerankKey = m.rerank.needsKey
 		m.rerankEndpoint = m.rerank.selected.Endpoint
 		m.rerankProviderLabel = m.rerank.selectedProviderLabel()
+		if m.reconfigure {
+			m.currentFormat = m.rerank.formatVal
+			m.step = stepSectionMenu
+			return m, nil
+		}
 		m.stepHistory = append(m.stepHistory, m.step)
 
 		// Advance to Triplex step (step 4).
@@ -336,6 +663,11 @@ func (m WizardModel) updateTriplex(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.extractorService = ""
 		}
 
+		if m.reconfigure {
+			m.step = stepSectionMenu
+			return m, nil
+		}
+
 		m.stepHistory = append(m.stepHistory, m.step)
 
 		// Skip keys step if no cloud providers selected.
@@ -370,6 +702,10 @@ func (m WizardModel) updateKeys(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.keys, cmd = m.keys.Update(msg)
 
 	if m.keys.done {
+		if m.reconfigure {
+			m.step = stepSectionMenu
+			return m, nil
+		}
 		m.confirm = newConfirmStep(m.config, m.rerank.formatVal, m.keys.collectedKeys)
 		m.stepHistory = append(m.stepHistory, m.step)
 		m.step = 6
@@ -456,13 +792,22 @@ func (m WizardModel) View() string {
 		width = 80
 	}
 
+	// Reconfigure-mode section menu (issue #115).
+	if m.step == stepSectionMenu {
+		return m.viewSectionMenu(width)
+	}
+
 	// Step indicator.
 	steps := []string{"Welcome", "Embed", "LLM", "Rerank", "Triplex", "Keys", "Confirm"}
 	stepLine := ""
+	stepIdx := m.step
+	if stepIdx < 0 || stepIdx > 6 {
+		stepIdx = 0
+	}
 	for i, name := range steps {
-		if i == m.step {
+		if i == stepIdx {
 			stepLine += selectedStyle.Render(fmt.Sprintf("[%s]", name))
-		} else if i < m.step {
+		} else if i < stepIdx {
 			stepLine += successStyle.Render(fmt.Sprintf("[%s]", name))
 		} else {
 			stepLine += mutedStyle.Render(fmt.Sprintf("[%s]", name))
@@ -472,6 +817,9 @@ func (m WizardModel) View() string {
 		}
 	}
 	view := stepLine + "\n\n"
+	if m.reconfigure {
+		view += mutedStyle.Render("Reconfigure mode — Esc returns to section menu") + "\n\n"
+	}
 
 	switch m.step {
 	case 0:
