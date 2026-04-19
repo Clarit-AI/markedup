@@ -44,6 +44,13 @@ type FallbackConfig struct {
 	// MaxFiles caps the number of files dispatched per enrich run. Nil = use
 	// the local/cloud default (50 cloud, unbounded local). Explicit 0 = unbounded.
 	MaxFiles *int `yaml:"max_files,omitempty"`
+	// Parallel enables concurrent fallback LLM calls (#141). Default false —
+	// sequential execution remains the safe default. Opt-in for users with
+	// capable hardware or cloud endpoints with high RPS.
+	Parallel bool `yaml:"parallel,omitempty"`
+	// ParallelWorkers caps the worker pool when Parallel=true. <=0 falls back
+	// to runtime.NumCPU() at dispatch time.
+	ParallelWorkers int `yaml:"parallel_workers,omitempty"`
 }
 
 // ServiceConfig holds endpoint, model, and authentication for a single service.

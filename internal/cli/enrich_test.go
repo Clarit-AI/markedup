@@ -14,11 +14,51 @@ import (
 
 func TestNewEnrichCmd_Flags(t *testing.T) {
 	cmd := newEnrichCmd()
-	flags := []string{"dry-run", "force", "skip-existing"}
+	flags := []string{"dry-run", "force", "skip-existing", "fallback-parallel"}
 	for _, name := range flags {
 		f := cmd.Flags().Lookup(name)
 		require.NotNilf(t, f, "flag --%s should exist", name)
 	}
+}
+
+// TestEnrichCmd_FallbackParallelFlagOverride verifies the #141 contract:
+// when --fallback-parallel is passed on the command line, it overrides
+// cfg.Enrich.Fallback.Parallel; when omitted, the config value wins.
+func TestEnrichCmd_FallbackParallelFlagOverride(t *testing.T) {
+	// Reset package-level state.
+	defer func() {
+		enrichFallbackParallel = false
+		enrichFallbackParallelSet = false
+	}()
+
+	t.Run("flag set true overrides config false", func(t *testing.T) {
+		enrichFallbackParallel = false
+		enrichFallbackParallelSet = false
+		cmd := newEnrichCmd()
+		require.NoError(t, cmd.ParseFlags([]string{"--fallback-parallel"}))
+		cmd.PreRun(cmd, nil)
+		assert.True(t, enrichFallbackParallelSet, "PreRun must mark flag as explicitly set")
+		assert.True(t, enrichFallbackParallel, "flag value should be true")
+	})
+
+	t.Run("flag omitted leaves Set=false", func(t *testing.T) {
+		enrichFallbackParallel = false
+		enrichFallbackParallelSet = false
+		cmd := newEnrichCmd()
+		require.NoError(t, cmd.ParseFlags([]string{}))
+		cmd.PreRun(cmd, nil)
+		assert.False(t, enrichFallbackParallelSet, "without the flag, Set must be false so config value wins")
+	})
+
+	t.Run("flag set false explicitly overrides config true", func(t *testing.T) {
+		enrichFallbackParallel = false
+		enrichFallbackParallelSet = false
+		cmd := newEnrichCmd()
+		require.NoError(t, cmd.ParseFlags([]string{"--fallback-parallel=false"}))
+		cmd.PreRun(cmd, nil)
+		assert.True(t, enrichFallbackParallelSet, "explicit --fallback-parallel=false must still mark Set")
+		assert.False(t, enrichFallbackParallel)
+	})
 }
 
 func TestRunEnrich_BasicEnrichment(t *testing.T) {

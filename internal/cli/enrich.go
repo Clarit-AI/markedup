@@ -31,6 +31,8 @@ var (
 	enrichFormat             string
 	enrichNuExtractMode      string
 	enrichNuExtractTransport string
+	enrichFallbackParallel   bool
+	enrichFallbackParallelSet bool
 )
 
 func newEnrichCmd() *cobra.Command {
@@ -60,6 +62,14 @@ Partial frontmatter is filled in without overwriting existing fields.`,
 	cmd.Flags().StringVar(&enrichFormat, "format", "", "Tier 2 extractor format: triplex, nuextract, generic (default: auto from config)")
 	cmd.Flags().StringVar(&enrichNuExtractMode, "nuextract-mode", "", "NuExtract run mode: parallel (default) or single")
 	cmd.Flags().StringVar(&enrichNuExtractTransport, "nuextract-transport", "", "NuExtract request transport: native (vLLM/HF) or manual (GGUF). Empty = auto-detect")
+	cmd.Flags().BoolVar(&enrichFallbackParallel, "fallback-parallel", false, "run LLM fallback retries concurrently (#141). Overrides cfg.Enrich.Fallback.Parallel when set.")
+
+	// PreRun captures whether the user explicitly passed --fallback-parallel
+	// so we can distinguish "flag default" from "flag set to false" — the
+	// override semantics in the resolution block below depend on it.
+	cmd.PreRun = func(c *cobra.Command, _ []string) {
+		enrichFallbackParallelSet = c.Flags().Changed("fallback-parallel")
+	}
 
 	return cmd
 }
@@ -417,8 +427,16 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 				jobs[i] = p.job
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), enrichTimeout*time.Duration(len(jobs)))
+			// Resolve parallel mode: explicit --fallback-parallel flag wins,
+			// otherwise inherit cfg.Enrich.Fallback.Parallel.
+			parallelMode := appConfig.Enrich.Fallback.Parallel
+			if enrichFallbackParallelSet {
+				parallelMode = enrichFallbackParallel
+			}
 			outcomes := enrich.RunFallbackBatch(ctx, extractor, jobs, enrich.FallbackBatchOptions{
 				MaxFiles: maxFiles,
+				Parallel: parallelMode,
+				Workers:  appConfig.Enrich.Fallback.ParallelWorkers,
 				Logger: func(format string, args ...any) {
 					fmt.Fprintf(out, "  "+format+"\n", args...)
 				},

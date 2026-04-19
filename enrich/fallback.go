@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/Clarit-AI/markedup/llm"
 	"github.com/Clarit-AI/markedup/schema"
@@ -329,14 +331,34 @@ type FallbackBatchOptions struct {
 	// MaxFiles caps the number of jobs processed. <=0 means unbounded.
 	MaxFiles int
 	// Logger receives one line per file (token counts, recovered/failed).
-	// Defaults to a no-op when nil.
+	// Defaults to a no-op when nil. The dispatcher serializes Logger calls so
+	// implementations need not be goroutine-safe even under Parallel mode.
 	Logger func(format string, args ...any)
+	// Parallel toggles the bounded worker-pool dispatcher (#141). Default
+	// false preserves byte-identical sequential semantics from #140. When
+	// true, jobs are processed concurrently up to Workers in flight; the
+	// returned []FallbackOutcome retains the input job order so callers'
+	// merge logic continues to address outcomes by job index.
+	Parallel bool
+	// Workers caps the parallel pool size. <=0 falls back to runtime.NumCPU().
+	// Ignored when Parallel=false.
+	Workers int
 }
 
-// RunFallbackBatch processes queued FallbackJobs sequentially and returns one
-// FallbackOutcome per attempted job. Jobs beyond MaxFiles are skipped (no
-// outcome appended). Caller is responsible for re-merging recovered results
-// into frontmatter via MergeModelResult / MergeSummary.
+// RunFallbackBatch processes queued FallbackJobs and returns one
+// FallbackOutcome per attempted job, in input order. Jobs beyond MaxFiles are
+// skipped (no outcome appended). Caller is responsible for re-merging
+// recovered results into frontmatter via MergeModelResult / MergeSummary.
+//
+// Sequential vs parallel: when opts.Parallel is false (default) the
+// dispatcher walks jobs sequentially — behavior is byte-identical to the
+// Phase 1 implementation. When opts.Parallel is true a bounded worker pool
+// of opts.Workers (default runtime.NumCPU()) processes jobs concurrently.
+// The returned slice preserves input order regardless of completion order so
+// the caller's merge loop can keep addressing outcomes by job index.
+//
+// Per-job errors are isolated in both modes — one extractor failure never
+// aborts the batch.
 func RunFallbackBatch(ctx context.Context, extractor FallbackExtractor, jobs []FallbackJob, opts FallbackBatchOptions) []FallbackOutcome {
 	if extractor == nil || len(jobs) == 0 {
 		return nil
@@ -350,6 +372,22 @@ func RunFallbackBatch(ctx context.Context, extractor FallbackExtractor, jobs []F
 		log("LLM fallback: capping at MaxFiles=%d (%d failures queued)", opts.MaxFiles, len(jobs))
 		limit = opts.MaxFiles
 	}
+	if !opts.Parallel {
+		return runFallbackSequential(ctx, extractor, jobs, limit, log)
+	}
+	workers := opts.Workers
+	if workers <= 0 {
+		workers = runtime.NumCPU()
+	}
+	if workers > limit {
+		workers = limit
+	}
+	return runFallbackParallel(ctx, extractor, jobs, limit, workers, log)
+}
+
+// runFallbackSequential is the Phase 1 (#140) loop, preserved verbatim so
+// non-parallel callers see byte-identical behavior + log lines.
+func runFallbackSequential(ctx context.Context, extractor FallbackExtractor, jobs []FallbackJob, limit int, log func(string, ...any)) []FallbackOutcome {
 	out := make([]FallbackOutcome, 0, limit)
 	for i := 0; i < limit; i++ {
 		job := jobs[i]
@@ -373,6 +411,81 @@ func RunFallbackBatch(ctx context.Context, extractor FallbackExtractor, jobs []F
 			log("LLM fallback %d/%d: %s failed: %v", i+1, limit, job.RelPath, err)
 		}
 		out = append(out, oc)
+	}
+	return out
+}
+
+// runFallbackParallel dispatches the [0:limit] slice of jobs through a
+// bounded worker pool of `workers` goroutines, then returns outcomes in
+// input order.
+//
+// Synchronization strategy: results are delivered through a buffered channel
+// to a single consumer goroutine that owns the shared outcomes slice and the
+// log writer — neither needs additional locking. The slice is preallocated
+// and indexed by job position so concurrent completion in any order produces
+// a deterministic order-preserving output. Logger calls are likewise
+// serialized through the same consumer, matching the sequential path's
+// guarantee that caller-supplied loggers need not be goroutine-safe.
+func runFallbackParallel(ctx context.Context, extractor FallbackExtractor, jobs []FallbackJob, limit, workers int, log func(string, ...any)) []FallbackOutcome {
+	log("LLM fallback: parallel mode, %d workers, %d jobs", workers, limit)
+	out := make([]FallbackOutcome, limit)
+
+	type indexed struct {
+		idx     int
+		outcome FallbackOutcome
+	}
+	results := make(chan indexed, limit)
+
+	// Bounded worker pool over the input job indices.
+	jobCh := make(chan int, limit)
+	for i := 0; i < limit; i++ {
+		jobCh <- i
+	}
+	close(jobCh)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobCh {
+				job := jobs[i]
+				inTok := approxTokens(job.Body)
+				res, err := extractor.Extract(ctx, job.Body, job.EntityTypes, job.Predicates)
+				outTok := 0
+				if res != nil {
+					outTok = approxTokensModelResult(res)
+				}
+				results <- indexed{
+					idx: i,
+					outcome: FallbackOutcome{
+						Job:          job,
+						Result:       res,
+						Err:          err,
+						InputTokens:  inTok,
+						OutputTokens: outTok,
+					},
+				}
+			}
+		}()
+	}
+
+	// Closer: when all workers exit, close results so the consumer drains.
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Single-consumer merge: writes to `out` and `log` happen here only.
+	completed := 0
+	for r := range results {
+		completed++
+		out[r.idx] = r.outcome
+		if r.outcome.Recovered() {
+			log("LLM fallback %d/%d: %s recovered (~%d output tokens)", completed, limit, r.outcome.Job.RelPath, r.outcome.OutputTokens)
+		} else {
+			log("LLM fallback %d/%d: %s failed: %v", completed, limit, r.outcome.Job.RelPath, r.outcome.Err)
+		}
 	}
 	return out
 }
