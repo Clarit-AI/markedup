@@ -557,6 +557,8 @@ markedup enrich [path] [flags]
 | `--api-key` | string | `""` | API key for model endpoint (optional) |
 | `--entity-types` | string | `""` | Comma-separated entity types for model extraction |
 | `--predicates` | string | `""` | Comma-separated relationship predicates for model extraction |
+| `--apply-fallback` | string | `""` | Merge a coding-agent retry-result YAML back into target files (skips normal enrichment) |
+| `--no-handoff` | bool | `false` | Suppress the interactive coding-agent handoff prompt when LLM fallback is unavailable |
 
 ### Tier 1 -- Deterministic Extraction
 
@@ -591,6 +593,53 @@ markedup enrich . --model triplex --endpoint http://localhost:11434
 ```
 
 > **License note:** Triplex is licensed under cc-by-nc-sa-4.0 (non-commercial use only).
+
+### Coding-Agent Handoff (`--apply-fallback`)
+
+When the primary Tier 2 extractor (NuExtract / Triplex) returns parse errors AND the configured LLM fallback (#140) is unavailable, disabled, capped, or itself fails, MarkedUp can hand the remaining failures to an external coding agent (`claude`, `codex`, …) for re-extraction.
+
+**Trigger conditions** — the interactive prompt fires only when ALL of these hold:
+
+1. At least one file failed Tier 2 with a parse error.
+2. The LLM fallback didn't recover it (unconfigured, disabled, MaxFiles cap, or upstream error).
+3. `stdin` is attached to a terminal (cron / piped runs are skipped).
+4. `--no-handoff` was not passed.
+
+**Flow:**
+
+```sh
+# 1. Run enrich; on TTY runs you'll be prompted:
+markedup enrich ./notes --model nuextract --endpoint http://localhost:8000
+# → 12 files failed Tier 2 extraction. Hand off to a coding agent? [y/N] y
+# → Handoff: wrote retry log to /Users/you/.markedup/logs/failed-enrichment-20260418-1730.md
+# → Run the following, then re-feed the result with `markedup enrich --apply-fallback`:
+# →     claude -p ~/.markedup/logs/failed-enrichment-20260418-1730.md --output-format yaml > ~/.markedup/logs/retry-result-20260418-1730.yaml
+
+# 2. Run the suggested command in your shell:
+claude -p ~/.markedup/logs/failed-enrichment-20260418-1730.md --output-format yaml > ~/.markedup/logs/retry-result-20260418-1730.yaml
+
+# 3. Merge the agent's YAML back into your files via the same MergeModelResult path
+#    NuExtract uses, so frontmatter shape stays canonical:
+markedup enrich --apply-fallback ~/.markedup/logs/retry-result-20260418-1730.yaml
+```
+
+The retry log is written even on non-interactive runs so cron / CI users can pick it up out-of-band; the summary line surfaces its path. PATH is probed in order (`claude`, `codex`, …) and the first match is used in the suggested command line; with no agent installed the suggestion uses `claude` as a placeholder you can substitute.
+
+The expected YAML shape (also embedded in the retry log itself):
+
+```yaml
+files:
+  - path: /absolute/path/to/note.md
+    entity_type: concept
+    summary: One-sentence description.
+    entities:
+      - {name: Widget, type: CONCEPT}
+      - {name: Acme,   type: ORGANIZATION}
+    relationships:
+      - {subject: Widget, predicate: made_by, object: Acme}
+```
+
+`--apply-fallback` tolerates code-fence-wrapped YAML (the agent may emit ```` ```yaml … ``` ````), skips per-file errors without aborting the batch, and exits non-zero only when every entry failed to merge.
 
 ### Merge Behavior
 

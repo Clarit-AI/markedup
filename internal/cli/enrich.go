@@ -31,8 +31,13 @@ var (
 	enrichFormat             string
 	enrichNuExtractMode      string
 	enrichNuExtractTransport string
-	enrichFallbackParallel   bool
+	enrichFallbackParallel    bool
 	enrichFallbackParallelSet bool
+	enrichApplyFallback       string
+	// enrichAssumeNo forces the coding-agent handoff prompt to answer "no"
+	// without reading stdin. Used by tests and `--no-handoff` style scripted
+	// runs where stdin is a TTY but the user wants the prompt suppressed.
+	enrichAssumeNo bool
 )
 
 func newEnrichCmd() *cobra.Command {
@@ -63,6 +68,8 @@ Partial frontmatter is filled in without overwriting existing fields.`,
 	cmd.Flags().StringVar(&enrichNuExtractMode, "nuextract-mode", "", "NuExtract run mode: parallel (default) or single")
 	cmd.Flags().StringVar(&enrichNuExtractTransport, "nuextract-transport", "", "NuExtract request transport: native (vLLM/HF) or manual (GGUF). Empty = auto-detect")
 	cmd.Flags().BoolVar(&enrichFallbackParallel, "fallback-parallel", false, "run LLM fallback retries concurrently (#141). Overrides cfg.Enrich.Fallback.Parallel when set.")
+	cmd.Flags().StringVar(&enrichApplyFallback, "apply-fallback", "", "merge a coding-agent retry-result YAML back into target files (skips normal enrichment)")
+	cmd.Flags().BoolVar(&enrichAssumeNo, "no-handoff", false, "skip the interactive coding-agent handoff prompt when LLM fallback is unavailable")
 
 	// PreRun captures whether the user explicitly passed --fallback-parallel
 	// so we can distinguish "flag default" from "flag set to false" — the
@@ -82,6 +89,16 @@ type enrichResult struct {
 }
 
 func runEnrich(cmd *cobra.Command, args []string) error {
+	out := cmd.OutOrStdout()
+
+	// --apply-fallback short-circuits the normal enrichment flow: parse the
+	// coding-agent's YAML output (#142 round-trip) and merge each file's
+	// recovered metadata into its frontmatter via the same MergeModelResult
+	// path NuExtract and the LLM fallback use.
+	if enrichApplyFallback != "" {
+		return runApplyFallback(out, enrichApplyFallback)
+	}
+
 	path := "."
 	if len(args) == 1 {
 		path = args[0]
@@ -91,8 +108,6 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
 	}
-
-	out := cmd.OutOrStdout()
 
 	// Determine if target is a single file or directory.
 	info, err := os.Stat(absPath)
@@ -372,6 +387,22 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 	// so recovered frontmatter is byte-comparable to what NuExtract would
 	// have produced.
 	var recovered, failedFallback int
+	// handoffJobs collects every still-failed file (LLM fallback unconfigured,
+	// disabled, capped, or itself errored). Phase 3 (#142) offers to hand
+	// these to an external coding agent when stdin is a TTY.
+	var handoffJobs []enrich.HandoffJob
+	addHandoffJob := func(p fallbackPending, fbErr error) {
+		handoffJobs = append(handoffJobs, enrich.HandoffJob{
+			Path:        p.job.Path,
+			RelPath:     p.job.RelPath,
+			Body:        p.job.Body,
+			RawResponse: extractRawFromErr(p.job.PrimaryErr),
+			PrimaryErr:  p.job.PrimaryErr,
+			FallbackErr: fbErr,
+			EntityTypes: p.job.EntityTypes,
+			Predicates:  p.job.Predicates,
+		})
+	}
 	if len(fallbackQueue) > 0 && !enrichDryRun {
 		// Resolve fallback config: explicit Enrich.Fallback fields fall back to
 		// the same MARKEDUP_LLM_* values that wire markedup_reason.
@@ -404,6 +435,7 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 					Status: "fallback-skipped",
 					Reason: "fallback disabled",
 				}
+				addHandoffJob(p, nil)
 			}
 		case fbEndpoint == "" || fbModel == "":
 			fmt.Fprintf(out, "LLM fallback unavailable: MARKEDUP_LLM_ENDPOINT/MODEL not set — %d files left unrecovered.\n", len(fallbackQueue))
@@ -414,6 +446,7 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 					Status: "fallback-skipped",
 					Reason: "no fallback endpoint configured",
 				}
+				addHandoffJob(p, nil)
 			}
 		default:
 			extractor := enrich.NewLLMFallbackExtractor(enrich.LLMFallbackConfig{
@@ -455,6 +488,7 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 						Status: "failed",
 						Reason: oc.Err.Error(),
 					}
+					addHandoffJob(p, oc.Err)
 					continue
 				}
 				// Re-merge through the canonical NuExtract→frontmatter path.
@@ -500,6 +534,7 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 					Path: p.job.Path, Status: "fallback-skipped",
 					Reason: fmt.Sprintf("MaxFiles=%d cap reached", maxFiles),
 				}
+				addHandoffJob(p, nil)
 			}
 		}
 	} else if len(fallbackQueue) > 0 && enrichDryRun {
@@ -509,6 +544,40 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 			results[p.resultIdx] = enrichResult{
 				Path:   p.job.Path,
 				Status: "fallback-pending-dry-run",
+			}
+		}
+	}
+
+	// Phase 3 (#142): coding-agent handoff. Triggered only when at least one
+	// file is still failed AND we're attached to a real terminal AND the
+	// user didn't pass --no-handoff. In non-interactive runs we still write
+	// the retry log and surface its path in the summary so cron / CI users
+	// have something to feed an external agent later.
+	var handoffPaths enrich.HandoffPaths
+	var handoffWritten bool
+	if len(handoffJobs) > 0 && !enrichDryRun {
+		interactive := enrich.IsInteractive() && !enrichAssumeNo
+		if interactive {
+			question := fmt.Sprintf("\n%d files failed Tier 2 extraction. Hand off to a coding agent? [y/N] ", len(handoffJobs))
+			if enrich.PromptYesNo(os.Stdin, out, question) {
+				paths, agentName, err := writeHandoffArtifacts(handoffJobs)
+				if err != nil {
+					fmt.Fprintf(out, "Handoff: failed to write retry log: %v\n", err)
+				} else {
+					handoffPaths = paths
+					handoffWritten = true
+					fmt.Fprintf(out, "Handoff: wrote retry log to %s\n", paths.LogPath)
+					fmt.Fprintln(out, "Run the following, then re-feed the result with `markedup enrich --apply-fallback`:")
+					fmt.Fprintf(out, "    %s\n", paths.SuggestedCommand(agentName))
+				}
+			}
+		} else {
+			// Non-interactive: write the log unprompted so it's available for
+			// out-of-band processing, but skip the suggested command line.
+			paths, _, err := writeHandoffArtifacts(handoffJobs)
+			if err == nil {
+				handoffPaths = paths
+				handoffWritten = true
 			}
 		}
 	}
@@ -531,10 +600,83 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 		}, "", "  ")
 		fmt.Fprintln(out, string(b))
 	} else if !enrichDryRun {
-		fmt.Fprintf(out, "Enriched %d. %d skipped. %d recovered via LLM fallback. %d failed.\n",
+		summary := fmt.Sprintf("Enriched %d. %d skipped. %d recovered via LLM fallback. %d failed.",
 			enriched, skipped, recovered, failed)
+		if handoffWritten {
+			summary += fmt.Sprintf(" Retry log: %s", handoffPaths.LogPath)
+		}
+		fmt.Fprintln(out, summary)
 	}
 
+	return nil
+}
+
+// writeHandoffArtifacts writes the retry log to ~/.markedup/logs/ and
+// returns the paths plus the coding-agent name used in the suggested
+// command line. Wrapped here so the runEnrich body stays focused on
+// orchestration; testable indirectly via the handoff_test.go covering
+// WriteRetryLog directly.
+func writeHandoffArtifacts(jobs []enrich.HandoffJob) (enrich.HandoffPaths, string, error) {
+	paths, err := enrich.LogPathsNow()
+	if err != nil {
+		return enrich.HandoffPaths{}, "", err
+	}
+	if err := enrich.WriteRetryLog(paths.LogPath, jobs); err != nil {
+		return enrich.HandoffPaths{}, "", err
+	}
+	_, name, ok := enrich.FindCodingAgent(nil)
+	if !ok {
+		// Fall back to the first known candidate as a placeholder; user can
+		// substitute whatever they have installed.
+		name = enrich.DefaultCodingAgents[0]
+	}
+	return paths, name, nil
+}
+
+// extractRawFromErr pulls the "raw: …" / "raw output: …" suffix the parse
+// errors embed so we can surface the unparseable model output in the retry
+// log without re-plumbing it through every extractor's return signature.
+func extractRawFromErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	for _, marker := range []string{"\nraw: ", "\nraw output: ", "raw: ", "raw output: "} {
+		if i := strings.Index(s, marker); i >= 0 {
+			return strings.TrimSpace(s[i+len(marker):])
+		}
+	}
+	return ""
+}
+
+// runApplyFallback parses a coding-agent retry-result YAML and merges each
+// file's recovered metadata into its target frontmatter via the canonical
+// MergeModelResult path. Fails fast on malformed YAML; per-file read/parse
+// errors are reported but don't abort the batch.
+func runApplyFallback(out io.Writer, resultPath string) error {
+	data, err := os.ReadFile(resultPath)
+	if err != nil {
+		return fmt.Errorf("apply-fallback: read %s: %w", resultPath, err)
+	}
+	doc, err := enrich.ParseFallbackResult(data)
+	if err != nil {
+		return err
+	}
+	outcomes := enrich.ApplyFallbackResult(doc, enrich.MergeOptions{Force: enrichForce})
+	applied, failed := 0, 0
+	for _, oc := range outcomes {
+		if oc.Applied {
+			applied++
+			fmt.Fprintf(out, "applied: %s\n", oc.Path)
+			continue
+		}
+		failed++
+		fmt.Fprintf(out, "failed:  %s — %v\n", oc.Path, oc.Err)
+	}
+	fmt.Fprintf(out, "Applied %d. %d failed.\n", applied, failed)
+	if applied == 0 && failed > 0 {
+		return fmt.Errorf("apply-fallback: no files merged successfully")
+	}
 	return nil
 }
 
