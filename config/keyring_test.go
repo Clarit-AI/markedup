@@ -114,4 +114,44 @@ func TestPublicAPI_Signatures(t *testing.T) {
 	var _ func(string) (string, error) = GetKey
 	var _ func(string) error = DeleteKey
 	var _ func() bool = KeyringAvailable
+	var _ func(string) string = KeyNameForEndpoint
+	var _ func(string) string = NormalizeEndpoint
+}
+
+// Issue #117: endpoint normalization and hashing.
+func TestNormalizeEndpoint(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"trailing slash", "https://openrouter.ai/api/v1/", "https://openrouter.ai/api/v1"},
+		{"no trailing slash", "https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1"},
+		{"uppercase host", "https://OpenRouter.AI/api/v1", "https://openrouter.ai/api/v1"},
+		{"default https port", "https://openrouter.ai:443/api/v1", "https://openrouter.ai/api/v1"},
+		{"default http port", "http://localhost:80/api", "http://localhost/api"},
+		{"non-default port preserved", "http://localhost:11434/v1", "http://localhost:11434/v1"},
+		{"strips query", "https://openrouter.ai/api/v1?token=x", "https://openrouter.ai/api/v1"},
+		{"unparseable falls back to lowercase", "not a url", "not a url"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, NormalizeEndpoint(tt.in))
+		})
+	}
+}
+
+func TestKeyNameForEndpoint_StableAndDeduped(t *testing.T) {
+	a := KeyNameForEndpoint("https://openrouter.ai/api/v1")
+	b := KeyNameForEndpoint("https://openrouter.ai/api/v1/")
+	c := KeyNameForEndpoint("https://OPENROUTER.ai/api/v1")
+	d := KeyNameForEndpoint("https://api.openai.com/v1")
+
+	require.NotEmpty(t, a, "non-empty endpoint should produce a key name")
+	assert.Equal(t, a, b, "trailing slash should not change the key name")
+	assert.Equal(t, a, c, "uppercase host should not change the key name")
+	assert.NotEqual(t, a, d, "different providers must produce different key names")
+	assert.True(t, len(a) == len("apikey-")+8, "key name format: apikey-<8 hex chars>")
+	assert.Empty(t, KeyNameForEndpoint(""), "empty endpoint -> empty key name")
 }

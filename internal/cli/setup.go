@@ -137,20 +137,39 @@ func runSetup(ctx context.Context, d *setupDeps) error {
 	}
 	fmt.Fprintf(w, "Configuration saved to %s\n", path)
 
-	// Step 5: Store API keys
-	keys := map[string]string{
-		"embed-api-key":  embedKey,
-		"llm-api-key":    llmKey,
-		"rerank-api-key": rerankKey,
+	// Step 5: Store API keys, deduplicated by endpoint (issue #117). Two
+	// services pointing at the same provider share a single keyring entry,
+	// so the OS keychain only prompts to unlock once per launch.
+	type pendingKey struct {
+		serviceLabel string
+		endpoint     string
+		value        string
+	}
+	pending := []pendingKey{
+		{"embed", cfg.Embed.Endpoint, embedKey},
+		{"llm", cfg.LLM.Endpoint, llmKey},
+		{"rerank", cfg.Rerank.Endpoint, rerankKey},
 	}
 
 	if d.KeyringAvail() {
-		for name, value := range keys {
-			if value != "" {
-				if err := d.StoreKey(name, value); err != nil {
-					fmt.Fprintf(w, "Warning: failed to store %s in keyring: %v\n", name, err)
-				}
+		written := map[string]bool{}
+		for _, pk := range pending {
+			if pk.value == "" {
+				continue
 			}
+			name := config.KeyNameForEndpoint(pk.endpoint)
+			if name == "" {
+				fmt.Fprintf(w, "Warning: no endpoint configured for %s — key not stored in keyring\n", pk.serviceLabel)
+				continue
+			}
+			if written[name] {
+				continue
+			}
+			if err := d.StoreKey(name, pk.value); err != nil {
+				fmt.Fprintf(w, "Warning: failed to store %s key in keyring: %v\n", pk.serviceLabel, err)
+				continue
+			}
+			written[name] = true
 		}
 		fmt.Fprintln(w, "API keys stored in OS keyring.")
 	} else {

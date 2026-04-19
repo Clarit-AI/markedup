@@ -572,7 +572,11 @@ func TestKeysStep_PrefilledOverwrite(t *testing.T) {
 }
 
 func TestKeysStep_NoPrefillNote_WhenNoPrefill(t *testing.T) {
-	ks := newKeysStep(true, "OpenRouter", "https://openrouter.ai/api", false, "", "", false, "", "", false, "", "", "")
+	// Use a unique endpoint that no developer machine will have an OS keychain
+	// entry for. After issue #117, keyring lookups are keyed by endpoint hash,
+	// so reusing a real provider URL here would hit a real saved key on the
+	// developer's machine and falsely fail the "no prefill" assertion.
+	ks := newKeysStep(true, "Test", "https://test-no-prefill.invalid/api", false, "", "", false, "", "", false, "", "", "")
 
 	view := ks.View(80)
 	assert.NotContains(t, view, "Existing API keys found", "should not show pre-fill note when no keys pre-filled")
@@ -715,4 +719,45 @@ func TestNewKeysStep_TriplexServiceDefault(t *testing.T) {
 	)
 	require.Len(t, ks.entries, 1)
 	assert.Equal(t, "triplex", ks.entries[0].service)
+}
+
+// Issue #117 regression: when three services are configured against the same
+// provider endpoint, the wizard must produce exactly one keyEntry (so the
+// save loop writes one keyring entry and the pre-fill issues one keyring
+// read), not three. This is the user-visible cause of "the OS Keychain
+// prompts to unlock multiple times on every launch."
+func TestNewKeysStep_DedupesByEndpoint_Issue117(t *testing.T) {
+	const sharedEndpoint = "https://openrouter.ai/api/v1"
+
+	ks := newKeysStep(
+		true, "OpenRouter", sharedEndpoint,
+		true, "OpenRouter", sharedEndpoint,
+		true, "OpenRouter", sharedEndpoint,
+		false, "", "",
+		"triplex",
+	)
+
+	require.Len(t, ks.entries, 1, "three services on one endpoint must collapse to one entry")
+	require.Len(t, ks.inputs, 1, "only one input prompt should be rendered")
+
+	primary := ks.entries[0]
+	assert.Equal(t, sharedEndpoint, primary.endpoint)
+	assert.Equal(t, "embed", primary.service, "first-claimed service is the primary")
+	assert.ElementsMatch(t, []string{"llm", "rerank"}, primary.services,
+		"the other services must be linked to the primary so the key applies to all")
+
+	// Simulate the save-loop dedup logic: iterate entries and count unique
+	// keyring writes that the wizard would issue. The fix relies on this
+	// being driven by entries (deduped) and not collectedKeys (per-service).
+	ks.collectedKeys = map[string]string{
+		"embed":  "sk-shared",
+		"llm":    "sk-shared",
+		"rerank": "sk-shared",
+	}
+	written := map[string]bool{}
+	for _, e := range ks.entries {
+		name := config.KeyNameForEndpoint(e.endpoint)
+		written[name] = true
+	}
+	assert.Len(t, written, 1, "issue #117: exactly one keyring write per shared endpoint")
 }

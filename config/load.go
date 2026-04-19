@@ -47,6 +47,15 @@ func Load(kbDir string) (*Config, error) {
 
 	cfg := mergeConfigs(global, local)
 	applyEnvOverrides(cfg)
+
+	// One-time migration of legacy per-service keyring entries to the
+	// endpoint-keyed format (issue #117). Idempotent: a no-op once migrated.
+	MigrateLegacyKeys(cfg)
+
+	// Hydrate any APIKey fields still empty (env vars / YAML did not provide
+	// one) from the keyring, looked up by endpoint. Same endpoint = one read.
+	hydrateKeysFromKeyring(cfg)
+
 	return cfg, nil
 }
 
