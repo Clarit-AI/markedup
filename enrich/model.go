@@ -165,7 +165,7 @@ func parseModelOutput(content string) (*ModelResult, error) {
 
 	var result ModelResult
 	if err := json.Unmarshal([]byte(content), &result); err != nil {
-		return nil, fmt.Errorf("enrich: parse model output: %w\nraw output: %s", err, truncate(content, 500))
+		return nil, fmt.Errorf("enrich: parse model output: %w (%w)\nraw output: %s", ErrParse, err, truncate(content, 500))
 	}
 
 	return &result, nil
