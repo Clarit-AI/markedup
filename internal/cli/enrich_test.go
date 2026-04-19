@@ -139,6 +139,78 @@ func TestRunEnrich_SkipComplete(t *testing.T) {
 	assert.Contains(t, buf.String(), "0 errors")
 }
 
+// TestRunEnrich_TierAwareSkip_NoModel verifies that when no --model is
+// configured, a Tier-1-complete file is skipped on re-run. Regression guard
+// for the post-#113 regression where IsComplete (which requires Tier 2) was
+// applied unconditionally, causing every file to be re-enriched on every
+// invocation when no model was configured.
+func TestRunEnrich_TierAwareSkip_NoModel(t *testing.T) {
+	dir := t.TempDir()
+
+	plain := "# My Document\n\nSome content with #golang tag.\n"
+	filePath := filepath.Join(dir, "my-doc.md")
+	require.NoError(t, os.WriteFile(filePath, []byte(plain), 0644))
+
+	runOnce := func() string {
+		cmd := newEnrichCmd()
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetArgs([]string{dir})
+
+		enrichDryRun = false
+		enrichForce = false
+		enrichSkipExist = false
+		enrichEndpoint, enrichModel, enrichAPIKey = "", "", ""
+
+		require.NoError(t, cmd.Execute())
+		return buf.String()
+	}
+
+	// First run: Tier 1 enrichment happens.
+	first := runOnce()
+	assert.Contains(t, first, "Enriched 1 files")
+
+	// Capture enriched file contents.
+	afterFirst, err := os.ReadFile(filePath)
+	require.NoError(t, err)
+
+	// Second run with no model: should SKIP (Tier-1-complete) — not re-enrich.
+	second := runOnce()
+	assert.Contains(t, second, "1 skipped", "second run without model must skip Tier-1-complete files")
+	assert.NotContains(t, second, "Enriched 1 files")
+
+	// File contents must be byte-identical (no rewrite).
+	afterSecond, err := os.ReadFile(filePath)
+	require.NoError(t, err)
+	assert.Equal(t, string(afterFirst), string(afterSecond), "file should not be rewritten on second run")
+}
+
+// TestRunEnrich_TierAwareSkip_ForceReprocesses verifies --force bypasses
+// the tier-aware skip even when the file is Tier-1-complete and no model
+// is configured.
+func TestRunEnrich_TierAwareSkip_ForceReprocesses(t *testing.T) {
+	dir := t.TempDir()
+
+	// Already Tier-1-complete frontmatter.
+	complete := "---\nid: doc\ntitle: Doc\nentity-type: concept\nconfidence: 0.9\n---\nBody.\n"
+	filePath := filepath.Join(dir, "doc.md")
+	require.NoError(t, os.WriteFile(filePath, []byte(complete), 0644))
+
+	cmd := newEnrichCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{dir, "--force"})
+
+	enrichDryRun = false
+	enrichForce = true
+	enrichSkipExist = false
+	enrichEndpoint, enrichModel, enrichAPIKey = "", "", ""
+
+	require.NoError(t, cmd.Execute())
+
+	assert.Contains(t, buf.String(), "Enriched 1 files", "--force must re-process even Tier-1-complete files")
+}
+
 func TestRunEnrich_Force(t *testing.T) {
 	dir := t.TempDir()
 
