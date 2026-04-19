@@ -545,18 +545,22 @@ func stripJSONFences(s string) string {
 }
 
 type nuextractEntity struct {
-	Name string        `json:"name"`
-	Type nuextractType `json:"type"`
+	Name string          `json:"name"`
+	Type nuextractScalar `json:"type"`
 }
 
-// nuextractType tolerates both string ("PERSON") and array-of-string
-// (["PERSON"]) values for the "type" field. NuExtract's template declares
-// the type enum as an array, and MLX quants occasionally echo the array
-// literal back verbatim instead of selecting a single enum value. We accept
-// either and collapse arrays to their first non-empty string.
-type nuextractType string
+// nuextractScalar tolerates both string ("PERSON") and array-of-string
+// (["PERSON"]) values on any JSON field whose template type is a scalar
+// string. NuExtract's templates declare enum-ish fields (entity type,
+// predicate) as arrays, and MLX / quantized runtimes occasionally echo an
+// array literal back verbatim — or wrap a plain "object"/"subject" string
+// in a singleton array — instead of selecting a single value. We accept
+// either and collapse arrays to their first non-empty string. Used for
+// `entities[].type` (issue #107) and `relationships[].subject/predicate/object`
+// (issue #131).
+type nuextractScalar string
 
-func (t *nuextractType) UnmarshalJSON(data []byte) error {
+func (t *nuextractScalar) UnmarshalJSON(data []byte) error {
 	trimmed := strings.TrimSpace(string(data))
 	if trimmed == "" || trimmed == "null" {
 		*t = ""
@@ -567,7 +571,7 @@ func (t *nuextractType) UnmarshalJSON(data []byte) error {
 		if err := json.Unmarshal(data, &s); err != nil {
 			return err
 		}
-		*t = nuextractType(s)
+		*t = nuextractScalar(s)
 		return nil
 	}
 	if trimmed[0] == '[' {
@@ -575,7 +579,7 @@ func (t *nuextractType) UnmarshalJSON(data []byte) error {
 		if err := json.Unmarshal(data, &arr); err == nil {
 			for _, s := range arr {
 				if strings.TrimSpace(s) != "" {
-					*t = nuextractType(s)
+					*t = nuextractScalar(s)
 					return nil
 				}
 			}
@@ -589,7 +593,7 @@ func (t *nuextractType) UnmarshalJSON(data []byte) error {
 		}
 		for _, v := range anyArr {
 			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-				*t = nuextractType(s)
+				*t = nuextractScalar(s)
 				return nil
 			}
 		}
@@ -602,9 +606,9 @@ func (t *nuextractType) UnmarshalJSON(data []byte) error {
 }
 
 type nuextractRelation struct {
-	Subject   string `json:"subject"`
-	Predicate string `json:"predicate"`
-	Object    string `json:"object"`
+	Subject   nuextractScalar `json:"subject"`
+	Predicate nuextractScalar `json:"predicate"`
+	Object    nuextractScalar `json:"object"`
 }
 
 func parseNuExtractEntities(content string) ([]schema.Entity, string, error) {
@@ -676,13 +680,14 @@ func entitiesFromRaw(raw []nuextractEntity) ([]schema.Entity, string, error) {
 func relationshipsFromRaw(raw []nuextractRelation) []schema.Relationship {
 	rels := make([]schema.Relationship, 0, len(raw))
 	for _, r := range raw {
-		target := strings.TrimSpace(r.Object)
-		if target == "" || strings.TrimSpace(r.Predicate) == "" {
+		target := strings.TrimSpace(string(r.Object))
+		predicate := strings.TrimSpace(string(r.Predicate))
+		if target == "" || predicate == "" {
 			continue
 		}
 		rels = append(rels, schema.Relationship{
 			Target:   target,
-			Type:     r.Predicate,
+			Type:     predicate,
 			Strength: nuExtractStrength,
 		})
 	}

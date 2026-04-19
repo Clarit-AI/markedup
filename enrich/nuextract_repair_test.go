@@ -44,7 +44,7 @@ func TestRepairNuExtractJSON_PatternA_ConcatenatedObjects(t *testing.T) {
 	assert.Equal(t, "LM Studio", parsed.Entities[0].Name)
 	assert.Equal(t, "TECHNOLOGY", string(parsed.Entities[0].Type))
 	require.Len(t, parsed.Relationships, 1)
-	assert.Equal(t, "lmstudio", parsed.Relationships[0].Subject)
+	assert.Equal(t, "lmstudio", string(parsed.Relationships[0].Subject))
 }
 
 // Pattern B — missing colon after key; closing quote present.
@@ -188,8 +188,9 @@ func TestRepairTruncatedTrailingBrace_SkipsBalancedInput(t *testing.T) {
 	assert.Equal(t, string(in), string(got))
 }
 
-// nuextractType must accept both string and array-of-string shapes, and
-// collapse the array to its first non-empty element.
+// nuextractScalar (formerly nuextractType) must accept both string and
+// array-of-string shapes, and collapse the array to its first non-empty
+// element.
 func TestNuextractType_AcceptsStringAndArray(t *testing.T) {
 	var e1 nuextractEntity
 	require.NoError(t, json.Unmarshal([]byte(`{"name":"x","type":"PERSON"}`), &e1))
@@ -206,4 +207,46 @@ func TestNuextractType_AcceptsStringAndArray(t *testing.T) {
 	var e4 nuextractEntity
 	require.NoError(t, json.Unmarshal([]byte(`{"name":"x","type":[]}`), &e4))
 	assert.Equal(t, "", string(e4.Type))
+}
+
+// Issue #131: NuExtract intermittently wraps relationships[].object (and
+// potentially subject/predicate) in a singleton/multi array instead of a
+// bare string. Before the fix, strict unmarshal failed and the entire
+// relationships extraction was dropped. This uses the exact README.md
+// failure payload from the issue and asserts that all 7 relationships
+// with non-empty predicate+object survive parsing, and that the
+// array-wrapped object collapses to its first non-empty element.
+func TestParseNuExtractRelations_Issue131ReadmePayload(t *testing.T) {
+	// Payload modeled after the README.md failure. Seven entries have
+	// non-empty predicate+object (one with array-wrapped object, one with
+	// array-wrapped subject to exercise the symmetry); two have a null
+	// predicate and are expected to be filtered out downstream.
+	payload := `{"relationships": [
+  {"subject": "markedup", "predicate": "uses", "object": "cli-reference"},
+  {"subject": "markedup", "predicate": "relates_to", "object": ["design-graph-reasoning-tool", "design-page-summaries"]},
+  {"subject": "markedup", "predicate": null, "object": "orphan-one"},
+  {"subject": ["markedup", "core"], "predicate": "depends_on", "object": "go"},
+  {"subject": "markedup", "predicate": "mentions", "object": "triplex"},
+  {"subject": "enrich", "predicate": "part_of", "object": "markedup"},
+  {"subject": "cli", "predicate": "uses", "object": "cobra"},
+  {"subject": "docs", "predicate": null, "object": "orphan-two"},
+  {"subject": "wizard", "predicate": "created_by", "object": "claude"}
+]}`
+
+	rels, err := parseNuExtractRelations(payload)
+	require.NoError(t, err, "relationships extraction must succeed despite array-wrapped fields")
+	require.Len(t, rels, 7, "expected 7 surviving relationships (2 dropped for null predicate)")
+
+	// Find the relationship whose target collapsed from the array.
+	// First non-empty element of ["design-graph-reasoning-tool", ...] is
+	// "design-graph-reasoning-tool".
+	var found bool
+	for _, r := range rels {
+		if r.Type == "relates_to" {
+			assert.Equal(t, "design-graph-reasoning-tool", r.Target,
+				"array-wrapped object should collapse to its first non-empty element")
+			found = true
+		}
+	}
+	assert.True(t, found, "expected to find the relates_to relation with collapsed object")
 }
