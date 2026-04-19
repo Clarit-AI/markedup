@@ -43,6 +43,10 @@ func runTUI(dir string) error {
 		}
 	}
 
+	// tui exposes search/embed/llm interactions — populate API keys from the
+	// keyring now (issue #153: lazy, opt-in hydration).
+	_ = config.HydrateKeys(appConfig)
+
 	result, err := index.Load(context.Background(), dir, index.WithIgnoreErrors(true))
 	if err != nil {
 		return fmt.Errorf("failed to load %s: %w", dir, err)

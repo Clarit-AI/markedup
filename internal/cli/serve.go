@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Clarit-AI/markedup/cache"
+	"github.com/Clarit-AI/markedup/config"
 	"github.com/Clarit-AI/markedup/embed"
 	"github.com/Clarit-AI/markedup/index"
 	"github.com/Clarit-AI/markedup/llm"
@@ -31,6 +32,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		path = args[0]
 	}
+
+	// serve exposes LLM/embed/rerank tools — populate API keys from the
+	// keyring now (issue #153: lazy, opt-in hydration).
+	_ = config.HydrateKeys(appConfig)
 
 	result, err := index.Load(context.Background(), path, index.WithIgnoreErrors(true))
 	if err != nil {

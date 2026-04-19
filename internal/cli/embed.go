@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Clarit-AI/markedup/cache"
+	"github.com/Clarit-AI/markedup/config"
 	"github.com/Clarit-AI/markedup/embed"
 	"github.com/Clarit-AI/markedup/index"
 	"github.com/Clarit-AI/markedup/schema"
@@ -50,6 +51,10 @@ func runEmbed(cmd *cobra.Command, args []string) error {
 	if embedStatus {
 		return runEmbedStatus(cmd)
 	}
+
+	// embed makes outbound API calls — populate API keys from the keyring
+	// now (issue #153: lazy, opt-in hydration).
+	_ = config.HydrateKeys(appConfig)
 
 	// Fall back to config values when CLI flags are empty.
 	if embedEndpoint == "" {

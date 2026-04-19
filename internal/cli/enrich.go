@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Clarit-AI/markedup/config"
 	"github.com/Clarit-AI/markedup/enrich"
 	"github.com/Clarit-AI/markedup/markdown"
 	"github.com/Clarit-AI/markedup/schema"
@@ -131,6 +132,10 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(out, "No markdown files found.")
 		return nil
 	}
+
+	// enrich makes outbound API calls — populate API keys from the keyring
+	// now (issue #153: lazy, opt-in hydration).
+	_ = config.HydrateKeys(appConfig)
 
 	// Validate format, mode, transport flags at the CLI boundary.
 	formatName, err := validateFormatName(firstNonEmpty(enrichFormat, appConfig.Format))

@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/Clarit-AI/markedup/cache"
+	"github.com/Clarit-AI/markedup/config"
 	"github.com/Clarit-AI/markedup/embed"
 	"github.com/Clarit-AI/markedup/index"
 	"github.com/Clarit-AI/markedup/rerank"
@@ -56,6 +57,12 @@ func runSearch(cmd *cobra.Command, args []string) error {
 
 	var searchOpts []index.SearchOption
 	searchOpts = append(searchOpts, index.WithContext(ctx))
+
+	// Only opt into keyring access when this invocation actually needs an
+	// outbound API call (issue #153: lazy, opt-in hydration).
+	if searchSemantic || searchRerank {
+		_ = config.HydrateKeys(appConfig)
+	}
 
 	if searchSemantic {
 		if appConfig.Embed.Endpoint == "" || appConfig.Embed.Model == "" {
