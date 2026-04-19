@@ -25,11 +25,18 @@ var legacyServiceKeyNames = []string{
 	"nuextract-api-key",
 }
 
-// openRing opens the OS keyring for the markedup service.
-func openRing() (keyring.Keyring, error) {
+// openRingFn is the package-level seam used to obtain a keyring.Keyring.
+// Tests override this to inject an in-memory or file-backed ring without
+// touching the real OS keychain. Production code keeps the default.
+var openRingFn = func() (keyring.Keyring, error) {
 	return keyring.Open(keyring.Config{
 		ServiceName: serviceName,
 	})
+}
+
+// openRing opens the OS keyring for the markedup service.
+func openRing() (keyring.Keyring, error) {
+	return openRingFn()
 }
 
 // StoreKey saves a named key to the OS keychain under the "markedup" service.
@@ -121,8 +128,14 @@ func NormalizeEndpoint(endpoint string) string {
 	return u.String()
 }
 
+// keyHashHexLen is the number of hex characters of sha256 used in keyring
+// entry names. 16 hex chars = 64 bits of collision resistance, which is
+// comfortably above the birthday-bound risk for the small set of endpoints
+// a single user will ever configure.
+const keyHashHexLen = 16
+
 // KeyNameForEndpoint returns the keyring entry name used to store the API key
-// for the given endpoint. Format: "apikey-<8 hex chars of sha256(normalized)>".
+// for the given endpoint. Format: "apikey-<16 hex chars of sha256(normalized)>".
 // Returns "" if the endpoint is empty after normalization.
 func KeyNameForEndpoint(endpoint string) string {
 	norm := NormalizeEndpoint(endpoint)
@@ -130,7 +143,7 @@ func KeyNameForEndpoint(endpoint string) string {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(norm))
-	return "apikey-" + hex.EncodeToString(sum[:])[:8]
+	return "apikey-" + hex.EncodeToString(sum[:])[:keyHashHexLen]
 }
 
 // hydrateKeysFromKeyring populates cfg.<Service>.APIKey for any service whose
@@ -143,7 +156,17 @@ func hydrateKeysFromKeyring(cfg *Config) {
 	if cfg == nil {
 		return
 	}
-	if !KeyringAvailable() {
+	ring, err := openRing()
+	if err != nil {
+		return
+	}
+	hydrateKeysFromKeyringWith(cfg, ring)
+}
+
+// hydrateKeysFromKeyringWith is the testable core: it operates on a supplied
+// keyring instance so tests can pass an in-memory or counting backend.
+func hydrateKeysFromKeyringWith(cfg *Config, ring keyring.Keyring) {
+	if cfg == nil || ring == nil {
 		return
 	}
 
@@ -157,12 +180,15 @@ func hydrateKeysFromKeyring(cfg *Config) {
 		if v, ok := cache[name]; ok {
 			return v
 		}
-		v, err := GetKey(name)
+		item, err := ring.Get(name)
 		if err != nil {
-			log.Printf("config: keyring lookup failed for %s: %v", name, err)
+			if err != keyring.ErrKeyNotFound {
+				log.Printf("config: keyring lookup failed for %s: %v", name, err)
+			}
 			cache[name] = ""
 			return ""
 		}
+		v := string(item.Data)
 		cache[name] = v
 		return v
 	}
@@ -200,6 +226,14 @@ func legacyServiceEndpoints(cfg *Config) map[string]string {
 	}
 }
 
+// MigrationResult summarizes what MigrateLegacyKeys did, primarily for tests
+// and logging. Counts are zero on a no-op (no legacy entries present).
+type MigrationResult struct {
+	Migrated  []string // legacy names successfully copied + removed
+	Conflicts []string // legacy names left in place because the endpoint-keyed entry already held a different value
+	Skipped   []string // legacy names with no endpoint configured (deferred)
+}
+
 // MigrateLegacyKeys consolidates legacy per-service keyring entries
 // ("embed-api-key", "llm-api-key", etc.) into the new endpoint-keyed format.
 //
@@ -207,28 +241,50 @@ func legacyServiceEndpoints(cfg *Config) map[string]string {
 //   - For each legacy entry that exists, look up the configured endpoint for
 //     that service. If the endpoint is unknown, leave the legacy entry alone
 //     (a later run, with a populated config, can migrate it).
-//   - Write the value under KeyNameForEndpoint(endpoint). If the new entry is
-//     already populated, do not overwrite (the wizard is the source of truth).
-//   - Delete the legacy entry once it has been migrated (or determined to be a
-//     duplicate of the already-migrated value).
+//   - If no endpoint-keyed entry exists yet, write the legacy value there and
+//     delete the legacy entry.
+//   - If an endpoint-keyed entry exists with the SAME value, the legacy entry
+//     is a duplicate; delete it.
+//   - If an endpoint-keyed entry exists with a DIFFERENT value, this is a
+//     conflict. Preserve BOTH entries (do not delete the legacy one) and emit
+//     a warning so the user can reconcile via the setup wizard. Idempotent on
+//     re-run: same situation -> same warning, no destructive action.
 //
-// Idempotent: repeated invocations after migration are no-ops because the
-// legacy entries no longer exist.
-func MigrateLegacyKeys(cfg *Config) {
-	if cfg == nil || !KeyringAvailable() {
-		return
+// Idempotent: repeated invocations after a successful migration are no-ops
+// because the legacy entries no longer exist; conflict cases stay stable too.
+func MigrateLegacyKeys(cfg *Config) MigrationResult {
+	if cfg == nil {
+		return MigrationResult{}
+	}
+	ring, err := openRing()
+	if err != nil {
+		return MigrationResult{}
+	}
+	return migrateLegacyKeysWith(cfg, ring)
+}
+
+// migrateLegacyKeysWith is the testable core: operates on a supplied keyring
+// instance so tests can avoid the OS keychain.
+func migrateLegacyKeysWith(cfg *Config, ring keyring.Keyring) MigrationResult {
+	result := MigrationResult{}
+	if cfg == nil || ring == nil {
+		return result
 	}
 
 	endpoints := legacyServiceEndpoints(cfg)
 
 	for _, legacyName := range legacyServiceKeyNames {
-		val, err := GetKey(legacyName)
+		item, err := ring.Get(legacyName)
 		if err != nil {
+			if err == keyring.ErrKeyNotFound {
+				continue
+			}
 			log.Printf("config: keyring read failed for legacy entry %s: %v", legacyName, err)
 			continue
 		}
+		val := string(item.Data)
 		if val == "" {
-			// Legacy entry not present — nothing to migrate.
+			// Legacy entry exists but holds nothing useful; treat as absent.
 			continue
 		}
 
@@ -237,6 +293,7 @@ func MigrateLegacyKeys(cfg *Config) {
 			// We have a legacy key but no endpoint to hash against. Skip and
 			// retry on a later launch once the user has configured the service.
 			log.Printf("config: keyring migration skipped for %s — no endpoint configured", legacyName)
+			result.Skipped = append(result.Skipped, legacyName)
 			continue
 		}
 
@@ -245,25 +302,41 @@ func MigrateLegacyKeys(cfg *Config) {
 			continue
 		}
 
-		existing, err := GetKey(newName)
-		if err != nil {
-			log.Printf("config: keyring read failed for %s: %v", newName, err)
-			continue
-		}
-
-		if existing == "" {
-			if err := StoreKey(newName, val); err != nil {
-				log.Printf("config: keyring migration write failed for %s: %v", newName, err)
+		existingItem, err := ring.Get(newName)
+		switch {
+		case err == keyring.ErrKeyNotFound:
+			// No endpoint-keyed entry yet — write it and remove legacy.
+			if setErr := ring.Set(keyring.Item{Key: newName, Data: []byte(val)}); setErr != nil {
+				log.Printf("config: keyring migration write failed for %s: %v", newName, setErr)
 				continue
 			}
+			if delErr := ring.Remove(legacyName); delErr != nil && delErr != keyring.ErrKeyNotFound {
+				log.Printf("config: failed to delete legacy keyring entry %s: %v", legacyName, delErr)
+			}
 			log.Printf("config: migrated legacy keyring entry %s -> %s", legacyName, newName)
-		} else {
-			log.Printf("config: legacy keyring entry %s already migrated -> %s", legacyName, newName)
-		}
+			result.Migrated = append(result.Migrated, legacyName)
 
-		if err := DeleteKey(legacyName); err != nil {
-			log.Printf("config: failed to delete legacy keyring entry %s: %v", legacyName, err)
+		case err != nil:
+			log.Printf("config: keyring read failed for %s: %v", newName, err)
+			continue
+
+		default:
+			// Endpoint-keyed entry already exists. Compare values.
+			if string(existingItem.Data) == val {
+				// Pure duplicate — safe to remove the legacy entry.
+				if delErr := ring.Remove(legacyName); delErr != nil && delErr != keyring.ErrKeyNotFound {
+					log.Printf("config: failed to delete legacy keyring entry %s: %v", legacyName, delErr)
+				}
+				log.Printf("config: legacy keyring entry %s already migrated -> %s", legacyName, newName)
+				result.Migrated = append(result.Migrated, legacyName)
+			} else {
+				// Conflict: do NOT delete the legacy entry. Surface a clear
+				// warning so the user can reconcile via the setup wizard.
+				log.Printf("config: legacy key for service %s conflicts with existing endpoint-keyed value; preserving both — please reconcile via setup wizard", legacyName)
+				result.Conflicts = append(result.Conflicts, legacyName)
+			}
 		}
 	}
-}
 
+	return result
+}
