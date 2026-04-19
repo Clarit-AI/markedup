@@ -180,17 +180,27 @@ func TestProviderStep_TKeyDispatchesProbe(t *testing.T) {
 }
 
 func TestProviderStep_CtrlTDispatchesProbe(t *testing.T) {
-	// Free-text mode: Ctrl+T should dispatch probe even with focused input.
+	// Free-text mode (custom endpoint at localhost): Ctrl+T should dispatch
+	// the probe even with focused input. Use Custom + localhost so the cloud
+	// guard does not trip; cloud-preset behavior is covered by the dedicated
+	// guard test below.
 	ps := newProviderStep("LLM", "", nil, "llm", false, false)
 	for i, c := range ps.choices {
-		if c.label == "OpenAI" {
+		if c.kind == "custom" {
 			ps.cursor = i
 			break
 		}
 	}
 	ps, _ = ps.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	require.Equal(t, 1, ps.phase)
+	ps.endpointIn.SetValue("http://localhost:8080")
+	ps, _ = ps.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	require.Equal(t, 2, ps.phase)
 	require.False(t, ps.pickerActive)
-	ps.modelIn.SetValue("gpt-4o-mini")
+	// Custom defaults to needsKey=true; force off so the local-style probe
+	// path is exercised here (the cloud guard has its own test).
+	ps.needsKey = false
+	ps.modelIn.SetValue("granite")
 
 	ps2, cmd := ps.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
 	assert.True(t, ps2.probeRunning)
@@ -323,4 +333,116 @@ func TestTriplexStep_ProbeResultRendered(t *testing.T) {
 	require.NotNil(t, ts2.probeResult)
 	view := ts2.View(80)
 	assert.Contains(t, view, "Connected")
+}
+
+// ---------------------------------------------------------------------------
+// #118 cloud guard: needsKey + empty apiKey → no HTTP request, hint rendered
+// ---------------------------------------------------------------------------
+
+func TestProviderStep_CloudGuard_NoRequest(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Cloud preset: pick "OpenRouter" → needsKey=true.
+	ps := newProviderStep("LLM", "", nil, "llm", false, false)
+	for i, c := range ps.choices {
+		if c.label == "OpenRouter" {
+			ps.cursor = i
+			break
+		}
+	}
+	ps, _ = ps.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	require.Equal(t, 2, ps.phase)
+	require.True(t, ps.needsKey, "OpenRouter is a cloud preset and must need a key")
+
+	// Override endpoint to point at the test server so we can detect any
+	// stray requests if the guard fails.
+	ps.selected.Endpoint = srv.URL
+	ps.modelIn.SetValue("gpt-4o-mini")
+
+	ps2, cmd := ps.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	assert.Nil(t, cmd, "guard should NOT dispatch a probe command when API key is missing")
+	assert.False(t, ps2.probeRunning, "probeRunning must stay false when guard trips")
+	require.NotNil(t, ps2.probeResult, "guard must populate probeResult with hint")
+	assert.False(t, ps2.probeResult.OK)
+	assert.Equal(t, needsKeyMessage, ps2.probeResult.Detail)
+	assert.Equal(t, 0, hits, "no HTTP request must reach the server")
+
+	// View must render the hint inline.
+	view := ps2.View(80)
+	assert.Contains(t, view, needsKeyMessage)
+}
+
+func TestProviderStep_LocalEndpoint_NoGuard(t *testing.T) {
+	// Local detected endpoint with needsKey=false → probe should dispatch.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}},
+		})
+	}))
+	defer srv.Close()
+
+	detected := []config.Endpoint{
+		{Name: "Local", URL: srv.URL, Type: "llm", Healthy: true, Models: []string{"x"}},
+	}
+	ps := newProviderStep("LLM", "", detected, "llm", false, false)
+	ps.cursor = 0
+	ps, _ = ps.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	require.True(t, ps.pickerActive)
+	require.False(t, ps.needsKey, "local detected endpoint must not be flagged needsKey")
+
+	ps2, cmd := ps.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	assert.NotNil(t, cmd, "local endpoints must continue to probe")
+	assert.True(t, ps2.probeRunning)
+}
+
+func TestTriplexStep_CloudGuard_NoRequest(t *testing.T) {
+	ts := newTriplexStep(nil)
+	ts.endpointIn.SetValue("https://api.openai.com")
+	ts.modelIn.SetValue(triplexModelName)
+
+	ts2, cmd := ts.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	assert.Nil(t, cmd, "guard should NOT dispatch a probe for cloud-looking endpoint")
+	assert.False(t, ts2.probeRunning)
+	require.NotNil(t, ts2.probeResult)
+	assert.False(t, ts2.probeResult.OK)
+	assert.Equal(t, needsKeyMessage, ts2.probeResult.Detail)
+
+	view := ts2.View(80)
+	assert.Contains(t, view, needsKeyMessage)
+}
+
+func TestTriplexStep_LocalEndpoint_NoGuard(t *testing.T) {
+	// localhost endpoint should bypass the guard. We don't need a real server
+	// here — verifying that a non-nil command is produced is sufficient.
+	ts := newTriplexStep(nil)
+	ts.endpointIn.SetValue("http://localhost:11434")
+	ts.modelIn.SetValue(triplexModelName)
+
+	ts2, cmd := ts.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	assert.NotNil(t, cmd, "localhost endpoints must continue to probe")
+	assert.True(t, ts2.probeRunning)
+}
+
+func TestEndpointNeedsKey(t *testing.T) {
+	cases := []struct {
+		endpoint string
+		want     bool
+	}{
+		{"", false},
+		{"http://localhost:11434", false},
+		{"http://127.0.0.1:8080", false},
+		{"http://LOCALHOST:1234", false},
+		{"https://api.openai.com", true},
+		{"https://openrouter.ai/api", true},
+		{"https://example.com/v1", true},
+	}
+	for _, tc := range cases {
+		got := endpointNeedsKey(tc.endpoint)
+		assert.Equal(t, tc.want, got, "endpointNeedsKey(%q)", tc.endpoint)
+	}
 }

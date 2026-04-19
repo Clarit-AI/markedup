@@ -17,6 +17,22 @@ import (
 // Test Connection (#118) — shared message + helper
 // ---------------------------------------------------------------------------
 
+// needsKeyMessage is the inline hint shown when the user presses the Test
+// Connection key on an endpoint that requires an API key. The key is not
+// collected until a later wizard step, so probing now would always 401.
+const needsKeyMessage = "Set API key in Keys step before testing this endpoint"
+
+// endpointNeedsKey is the canonical heuristic for "does this endpoint need
+// an API key" — kept here so providerStep, triplexStep, and the Test
+// Connection guard all agree. Loopback addresses are assumed key-less.
+func endpointNeedsKey(endpoint string) bool {
+	if endpoint == "" {
+		return false
+	}
+	lower := strings.ToLower(endpoint)
+	return !strings.Contains(lower, "localhost") && !strings.Contains(lower, "127.0.0.1")
+}
+
 // probeResultMsg carries a Test Connection probe outcome back to the wizard
 // step that initiated it. Step is the destination ("embed", "llm", "rerank",
 // "triplex", "nuextract") so the parent can route the result to the right
@@ -534,6 +550,17 @@ func (p providerStep) Update(msg tea.Msg) (providerStep, tea.Cmd) {
 				if model == "" || p.selected.Endpoint == "" || p.probeRunning {
 					return p, nil
 				}
+				// Cloud guard: API key is collected in a later step, so probing
+				// a needsKey endpoint with no key in hand will always 401.
+				// Show an inline hint instead of dispatching the request.
+				if p.needsKey {
+					p.probeRunning = false
+					p.probeResult = &config.ProbeResult{
+						OK:     false,
+						Detail: needsKeyMessage,
+					}
+					return p, nil
+				}
 				p.probeRunning = true
 				p.probeResult = nil
 				return p, probeCmd(p.serviceName, p.serviceName, p.selected.Endpoint, model, "")
@@ -840,6 +867,17 @@ func (t triplexStep) Update(msg tea.Msg) (triplexStep, tea.Cmd) {
 			svc := "triplex"
 			if config.IsNuExtractModel(model) {
 				svc = "nuextract"
+			}
+			// Cloud guard: same logic as the Enter handler below — non-loopback
+			// endpoints assume an API key, which isn't available until the Keys
+			// step. Skip the probe and surface a hint instead of guaranteed 401.
+			if endpointNeedsKey(ep) {
+				t.probeRunning = false
+				t.probeResult = &config.ProbeResult{
+					OK:     false,
+					Detail: needsKeyMessage,
+				}
+				return t, nil
 			}
 			t.probeRunning = true
 			t.probeResult = nil
