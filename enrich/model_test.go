@@ -342,7 +342,7 @@ func TestMergeModelResult_Default(t *testing.T) {
 		},
 	}
 	model := &ModelResult{
-		EntityType: "concept", // should NOT override since existing has entity type
+		EntityType: "concept", // "document" default → promotes to "concept" (issue #128)
 		Entities: []schema.Entity{
 			{Name: "Go", Role: "language"},   // duplicate — skip
 			{Name: "Rust", Role: "language"}, // new — add
@@ -356,8 +356,8 @@ func TestMergeModelResult_Default(t *testing.T) {
 
 	result := MergeModelResult(existing, model, MergeOptions{})
 
-	assert.Equal(t, "document", result.EntityType) // preserved
-	assert.Len(t, result.Entities, 2)              // Go + Rust
+	assert.Equal(t, "concept", result.EntityType) // document → concept (default upgrade)
+	assert.Len(t, result.Entities, 2)             // Go + Rust
 	// Tier 2 relationships route into SemanticRelationships (issue #109).
 	assert.Empty(t, result.Relationships, "Tier 2 must not write to Relationships")
 	assert.Len(t, result.SemanticRelationships, 1)
@@ -384,6 +384,81 @@ func TestMergeModelResult_SummaryForce(t *testing.T) {
 	model := &ModelResult{Summary: "New"}
 	result := MergeModelResult(existing, model, MergeOptions{Force: true})
 	assert.Equal(t, "New", result.Summary)
+}
+
+// TestMergeModelResult_EntityType_Whitelist_Sticky covers the three-layer
+// guard introduced for issue #128: whitelist (reject out-of-set), sticky for
+// non-default (don't overwrite user/prior confident type), and default upgrade
+// ("document" → real type accepted).
+func TestMergeModelResult_EntityType_Whitelist_Sticky(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing string
+		model    string
+		force    bool
+		want     string
+	}{
+		// Default (force=false) branch
+		{"empty-existing accepts valid", "", "concept", false, "concept"},
+		{"document upgrades to concept", "document", "concept", false, "concept"},
+		{"non-default sticky preserved", "software", "date", false, "software"},
+		{"non-default sticky even if model is valid", "project", "person", false, "project"},
+		{"invalid model ignored, empty preserved", "", "date", false, ""},
+		{"invalid model ignored, document preserved", "document", "location", false, "document"},
+		{"empty model is no-op", "concept", "", false, "concept"},
+		{"legacy non-whitelist existing stays put", "legacy-type", "concept", false, "legacy-type"},
+		{"case-insensitive model accepted", "document", "CONCEPT", false, "concept"},
+
+		// Force branch — same three-layer policy
+		{"force: empty-existing accepts valid", "", "concept", true, "concept"},
+		{"force: document upgrades to concept", "document", "concept", true, "concept"},
+		{"force: non-default sticky preserved", "software", "date", true, "software"},
+		{"force: non-default sticky even if model valid", "project", "person", true, "project"},
+		{"force: invalid model ignored, software preserved", "software", "date", true, "software"},
+		{"force: empty model is no-op", "concept", "", true, "concept"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			existing := schema.GraphFrontmatter{EntityType: tc.existing}
+			model := &ModelResult{EntityType: tc.model}
+			result := MergeModelResult(existing, model, MergeOptions{Force: tc.force})
+			assert.Equal(t, tc.want, result.EntityType)
+		})
+	}
+}
+
+// TestMergeModelResult_EntityType_RealWorldRegression mirrors the IRL Wave 6
+// observation from issue #128: a file with `entity-type: software` must not
+// be flipped to `date` by Tier 2 NuExtract output, even across --force reruns.
+func TestMergeModelResult_EntityType_RealWorldRegression(t *testing.T) {
+	existing := schema.GraphFrontmatter{
+		ID:         "cli-reference",
+		Title:      "CLI Reference",
+		EntityType: "software",
+		Confidence: 0.9,
+	}
+	// Simulate NuExtract returning garbage type (the IRL failure mode).
+	badModel := &ModelResult{EntityType: "date", Summary: "CLI docs."}
+
+	// Default merge: software preserved.
+	got := MergeModelResult(existing, badModel, MergeOptions{})
+	assert.Equal(t, "software", got.EntityType, "default merge must not flip software→date")
+
+	// Force merge (the user's reproducer): still preserved.
+	gotForce := MergeModelResult(existing, badModel, MergeOptions{Force: true})
+	assert.Equal(t, "software", gotForce.EntityType, "--force must not flip software→date")
+}
+
+func TestIsValidEntityType(t *testing.T) {
+	// Sanity-check the schema helper from the enrich package's perspective.
+	assert.True(t, schema.IsValidEntityType("concept"))
+	assert.True(t, schema.IsValidEntityType("CONCEPT"))
+	assert.True(t, schema.IsValidEntityType("document"))
+	assert.False(t, schema.IsValidEntityType(""))
+	assert.False(t, schema.IsValidEntityType("date"))
+	assert.False(t, schema.IsValidEntityType("location"))
+	assert.False(t, schema.IsValidEntityType("random-garbage"))
 }
 
 func TestMergeModelResult_Force(t *testing.T) {
