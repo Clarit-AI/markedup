@@ -10,8 +10,40 @@ type Config struct {
 	LLM       ServiceConfig   `yaml:"llm"`
 	Triplex   ServiceConfig   `yaml:"triplex,omitempty"`
 	NuExtract NuExtractConfig `yaml:"nuextract,omitempty"`
+	Enrich    EnrichConfig    `yaml:"enrich,omitempty"`
 	// Format selects the Tier 2 extractor: "triplex", "nuextract", "generic", or "" (auto).
 	Format string `yaml:"format,omitempty"`
+}
+
+// EnrichConfig holds enrich-pipeline-wide settings. Currently a single
+// nested Fallback block; left as a struct (not inlined) so future enrich
+// settings — Parallel, Verbose, FailOnError — can land without churning the
+// top-level config shape.
+type EnrichConfig struct {
+	Fallback FallbackConfig `yaml:"fallback,omitempty"`
+}
+
+// FallbackConfig configures the LLM fallback dispatcher (issue #140).
+//
+// Defaults are resolved at call-time, not parse-time: an empty Endpoint
+// inherits cfg.LLM.Endpoint (the same env-var-backed reasoning endpoint the
+// markedup_reason MCP tool uses), and Enabled / MaxFiles defaults depend on
+// whether the resolved endpoint is local or cloud. See enrich.IsLocalEndpoint
+// and the resolution path in internal/cli/enrich.go.
+type FallbackConfig struct {
+	// Enabled is a tri-state pointer: nil = "use the local/cloud default",
+	// non-nil = explicit user choice. Local endpoints default-on; cloud
+	// endpoints default-off (cost guard).
+	Enabled *bool `yaml:"enabled,omitempty"`
+	// Endpoint overrides cfg.LLM.Endpoint for fallback only. Empty = inherit.
+	Endpoint string `yaml:"endpoint,omitempty"`
+	// Model overrides cfg.LLM.Model for fallback only. Empty = inherit.
+	Model string `yaml:"model,omitempty"`
+	// APIKey overrides cfg.LLM.APIKey for fallback only.
+	APIKey string `yaml:"-"` // NEVER written to YAML
+	// MaxFiles caps the number of files dispatched per enrich run. Nil = use
+	// the local/cloud default (50 cloud, unbounded local). Explicit 0 = unbounded.
+	MaxFiles *int `yaml:"max_files,omitempty"`
 }
 
 // ServiceConfig holds endpoint, model, and authentication for a single service.

@@ -130,12 +130,34 @@ func mergeConfigs(base, override *Config) *Config {
 	out.Triplex = mergeService(base.Triplex, override.Triplex)
 	out.Rerank = mergeRerank(base.Rerank, override.Rerank)
 	out.NuExtract = mergeNuExtract(base.NuExtract, override.NuExtract)
+	out.Enrich = mergeEnrich(base.Enrich, override.Enrich)
 
 	out.Format = base.Format
 	if override.Format != "" {
 		out.Format = override.Format
 	}
 
+	return out
+}
+
+func mergeEnrich(base, override EnrichConfig) EnrichConfig {
+	out := EnrichConfig{Fallback: base.Fallback}
+	// Pointer fields: non-nil override wins; nil = inherit base.
+	if override.Fallback.Enabled != nil {
+		out.Fallback.Enabled = override.Fallback.Enabled
+	}
+	if override.Fallback.MaxFiles != nil {
+		out.Fallback.MaxFiles = override.Fallback.MaxFiles
+	}
+	if override.Fallback.Endpoint != "" {
+		out.Fallback.Endpoint = override.Fallback.Endpoint
+	}
+	if override.Fallback.Model != "" {
+		out.Fallback.Model = override.Fallback.Model
+	}
+	if override.Fallback.APIKey != "" {
+		out.Fallback.APIKey = override.Fallback.APIKey
+	}
 	return out
 }
 
@@ -216,6 +238,16 @@ func applyEnvOverrides(cfg *Config) {
 	setFromEnv(&cfg.NuExtract.Transport, "MARKEDUP_NUEXTRACT_TRANSPORT")
 
 	setFromEnv(&cfg.Format, "MARKEDUP_FORMAT")
+
+	// Enrich.Fallback env overrides (issue #140). Endpoint/Model/Key follow
+	// the standard MARKEDUP_<SECTION>_<FIELD> shape.
+	setFromEnv(&cfg.Enrich.Fallback.Endpoint, "MARKEDUP_ENRICH_FALLBACK_ENDPOINT")
+	setFromEnv(&cfg.Enrich.Fallback.Model, "MARKEDUP_ENRICH_FALLBACK_MODEL")
+	setFromEnv(&cfg.Enrich.Fallback.APIKey, "MARKEDUP_ENRICH_FALLBACK_API_KEY")
+	if v := os.Getenv("MARKEDUP_ENRICH_FALLBACK_ENABLED"); v != "" {
+		b := v == "1" || v == "true" || v == "TRUE" || v == "yes"
+		cfg.Enrich.Fallback.Enabled = &b
+	}
 }
 
 func setFromEnv(target *string, envKey string) {

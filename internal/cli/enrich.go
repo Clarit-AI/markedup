@@ -207,6 +207,19 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 	var results []enrichResult
 	enriched, skipped, errors := 0, 0, 0
 
+	// Phase 1 LLM fallback queue (#140). Files whose Tier 2 extraction failed
+	// with a parse error get a job appended here; the batch runs after the
+	// main loop completes and re-merges recovered results into the captured
+	// post-Tier-1 frontmatter so the final write is identical to a successful
+	// primary run.
+	type fallbackPending struct {
+		job       enrich.FallbackJob
+		preTier2  schema.GraphFrontmatter
+		fileBytes []byte // for re-replacing frontmatter after recovery
+		resultIdx int    // index in results slice to update on outcome
+	}
+	var fallbackQueue []fallbackPending
+
 	for _, filePath := range files {
 		data, readErr := os.ReadFile(filePath)
 		if readErr != nil {
@@ -265,6 +278,24 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 
 			if modelErr != nil {
 				fmt.Fprintf(out, "  Warning: model extraction failed for %s: %v\n", relPath, modelErr)
+				// Enqueue parse-error failures for the LLM fallback batch
+				// (#140). Empty results from a successful Tier 2 run are NOT
+				// enqueued — that's a settled design call (#134).
+				if enrich.IsParseError(modelErr) {
+					fallbackQueue = append(fallbackQueue, fallbackPending{
+						job: enrich.FallbackJob{
+							Path:        filePath,
+							RelPath:     relPath,
+							Body:        page.Body,
+							EntityTypes: entityTypes,
+							Predicates:  predicates,
+							PrimaryErr:  modelErr,
+						},
+						preTier2:  merged,
+						fileBytes: data,
+						resultIdx: len(results), // index of the row appended below
+					})
+				}
 			} else {
 				merged = enrich.MergeModelResult(merged, modelResult, opts)
 			}
@@ -308,26 +339,182 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		// If this file was queued for fallback (Tier 2 parse-error), record
+		// it as pending — the dispatcher below will rewrite the row to
+		// "recovered" or "failed" once the batch completes. Pending rows are
+		// NOT counted toward `enriched` so the summary's primary/recovered/
+		// failed split stays clean.
+		queuedForFallback := len(fallbackQueue) > 0 &&
+			fallbackQueue[len(fallbackQueue)-1].job.Path == filePath &&
+			fallbackQueue[len(fallbackQueue)-1].resultIdx == len(results)
+		if queuedForFallback {
+			results = append(results, enrichResult{Path: filePath, Status: "pending-fallback"})
+			continue
+		}
+
 		results = append(results, enrichResult{Path: filePath, Status: "enriched"})
 		enriched++
 	}
 
+	// LLM fallback batch (#140). Sequential, post-main-loop. Recovered files
+	// re-merge their model result into the captured post-Tier-1 frontmatter
+	// and re-write — the merge path is identical to a successful primary run,
+	// so recovered frontmatter is byte-comparable to what NuExtract would
+	// have produced.
+	var recovered, failedFallback int
+	if len(fallbackQueue) > 0 && !enrichDryRun {
+		// Resolve fallback config: explicit Enrich.Fallback fields fall back to
+		// the same MARKEDUP_LLM_* values that wire markedup_reason.
+		fbEndpoint := firstNonEmpty(appConfig.Enrich.Fallback.Endpoint, appConfig.LLM.Endpoint)
+		fbModel := firstNonEmpty(appConfig.Enrich.Fallback.Model, appConfig.LLM.Model)
+		fbAPIKey := firstNonEmpty(appConfig.Enrich.Fallback.APIKey, appConfig.LLM.APIKey)
+		isLocal := enrich.IsLocalEndpoint(fbEndpoint)
+
+		// Tri-state Enabled: nil = local default-on / cloud default-off.
+		enabled := isLocal
+		if appConfig.Enrich.Fallback.Enabled != nil {
+			enabled = *appConfig.Enrich.Fallback.Enabled
+		}
+		// Tri-state MaxFiles: nil = local unbounded (0) / cloud 50.
+		maxFiles := 0
+		if !isLocal {
+			maxFiles = 50
+		}
+		if appConfig.Enrich.Fallback.MaxFiles != nil {
+			maxFiles = *appConfig.Enrich.Fallback.MaxFiles
+		}
+
+		switch {
+		case !enabled:
+			fmt.Fprintf(out, "LLM fallback disabled — %d files left unrecovered.\n", len(fallbackQueue))
+			failedFallback = len(fallbackQueue)
+			for _, p := range fallbackQueue {
+				results[p.resultIdx] = enrichResult{
+					Path:   p.job.Path,
+					Status: "fallback-skipped",
+					Reason: "fallback disabled",
+				}
+			}
+		case fbEndpoint == "" || fbModel == "":
+			fmt.Fprintf(out, "LLM fallback unavailable: MARKEDUP_LLM_ENDPOINT/MODEL not set — %d files left unrecovered.\n", len(fallbackQueue))
+			failedFallback = len(fallbackQueue)
+			for _, p := range fallbackQueue {
+				results[p.resultIdx] = enrichResult{
+					Path:   p.job.Path,
+					Status: "fallback-skipped",
+					Reason: "no fallback endpoint configured",
+				}
+			}
+		default:
+			extractor := enrich.NewLLMFallbackExtractor(enrich.LLMFallbackConfig{
+				Endpoint:   fbEndpoint,
+				Model:      fbModel,
+				APIKey:     fbAPIKey,
+				SchemaMode: !isLocal, // local runtimes (llama.cpp/Ollama) often lack json_schema; cloud has it.
+			})
+			jobs := make([]enrich.FallbackJob, len(fallbackQueue))
+			for i, p := range fallbackQueue {
+				jobs[i] = p.job
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), enrichTimeout*time.Duration(len(jobs)))
+			outcomes := enrich.RunFallbackBatch(ctx, extractor, jobs, enrich.FallbackBatchOptions{
+				MaxFiles: maxFiles,
+				Logger: func(format string, args ...any) {
+					fmt.Fprintf(out, "  "+format+"\n", args...)
+				},
+			})
+			cancel()
+
+			// Apply outcomes back to the captured pre-Tier-2 frontmatter and
+			// rewrite the file. Outcomes correspond 1:1 with fallbackQueue[:len(outcomes)]
+			// (the dispatcher preserves order and may truncate at MaxFiles).
+			for i, oc := range outcomes {
+				p := fallbackQueue[i]
+				if !oc.Recovered() {
+					failedFallback++
+					results[p.resultIdx] = enrichResult{
+						Path:   p.job.Path,
+						Status: "failed",
+						Reason: oc.Err.Error(),
+					}
+					continue
+				}
+				// Re-merge through the canonical NuExtract→frontmatter path.
+				merged := enrich.MergeModelResult(p.preTier2, oc.Result, opts)
+				if merged.Summary == "" || enrichForce {
+					if oc.Result.Summary != "" {
+						merged = enrich.MergeSummary(merged, oc.Result.Summary, opts)
+					} else if modelExtractor != nil {
+						bodyPreview := enrich.BodyPreview(p.job.Body, 500)
+						sctx, scancel := context.WithTimeout(context.Background(), enrichTimeout)
+						summary, sErr := modelExtractor.GenerateSummary(sctx, merged.Title, merged.EntityType, merged.Tags, bodyPreview)
+						scancel()
+						if sErr == nil {
+							merged = enrich.MergeSummary(merged, summary, opts)
+						}
+					}
+				}
+				content, wErr := markdown.ReplaceFrontmatter(&merged, p.fileBytes)
+				if wErr != nil {
+					failedFallback++
+					results[p.resultIdx] = enrichResult{
+						Path: p.job.Path, Status: "failed",
+						Reason: fmt.Sprintf("recovered but failed to render frontmatter: %v", wErr),
+					}
+					continue
+				}
+				if wErr := markdown.WriteFrontmatterFile(p.job.Path, content); wErr != nil {
+					failedFallback++
+					results[p.resultIdx] = enrichResult{
+						Path: p.job.Path, Status: "failed",
+						Reason: fmt.Sprintf("recovered but failed to write: %v", wErr),
+					}
+					continue
+				}
+				recovered++
+				results[p.resultIdx] = enrichResult{Path: p.job.Path, Status: "recovered"}
+			}
+			// Any queued jobs beyond MaxFiles are reported as fallback-skipped.
+			for i := len(outcomes); i < len(fallbackQueue); i++ {
+				p := fallbackQueue[i]
+				failedFallback++
+				results[p.resultIdx] = enrichResult{
+					Path: p.job.Path, Status: "fallback-skipped",
+					Reason: fmt.Sprintf("MaxFiles=%d cap reached", maxFiles),
+				}
+			}
+		}
+	} else if len(fallbackQueue) > 0 && enrichDryRun {
+		// Dry-run: don't make LLM calls. Just report what would happen.
+		fmt.Fprintf(out, "Dry-run: %d files would be queued for LLM fallback.\n", len(fallbackQueue))
+		for _, p := range fallbackQueue {
+			results[p.resultIdx] = enrichResult{
+				Path:   p.job.Path,
+				Status: "fallback-pending-dry-run",
+			}
+		}
+	}
+
 	// Print summary.
+	failed := errors + failedFallback
 	if jsonOutput {
 		b, _ := json.MarshalIndent(struct {
-			Enriched int            `json:"enriched"`
-			Skipped  int            `json:"skipped"`
-			Errors   int            `json:"errors"`
-			Files    []enrichResult `json:"files"`
+			Enriched  int            `json:"enriched"`
+			Skipped   int            `json:"skipped"`
+			Recovered int            `json:"recovered"`
+			Failed    int            `json:"failed"`
+			Files     []enrichResult `json:"files"`
 		}{
-			Enriched: enriched,
-			Skipped:  skipped,
-			Errors:   errors,
-			Files:    results,
+			Enriched:  enriched,
+			Skipped:   skipped,
+			Recovered: recovered,
+			Failed:    failed,
+			Files:     results,
 		}, "", "  ")
 		fmt.Fprintln(out, string(b))
 	} else if !enrichDryRun {
-		fmt.Fprintf(out, "Enriched %d files. %d skipped. %d errors.\n", enriched, skipped, errors)
+		fmt.Fprintf(out, "Enriched %d. %d skipped. %d recovered via LLM fallback. %d failed.\n",
+			enriched, skipped, recovered, failed)
 	}
 
 	return nil

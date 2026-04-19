@@ -42,7 +42,7 @@ func TestRunEnrich_BasicEnrichment(t *testing.T) {
 	require.NoError(t, err)
 
 	// Check output
-	assert.Contains(t, buf.String(), "Enriched 1 files")
+	assert.Contains(t, buf.String(), "Enriched 1.")
 
 	// Verify file was enriched.
 	data, err := os.ReadFile(filepath.Join(dir, "my-doc.md"))
@@ -108,7 +108,7 @@ func TestRunEnrich_SkipExisting(t *testing.T) {
 	err := cmd.Execute()
 	require.NoError(t, err)
 
-	assert.Contains(t, buf.String(), "Enriched 1 files")
+	assert.Contains(t, buf.String(), "Enriched 1.")
 	assert.Contains(t, buf.String(), "1 skipped")
 
 	// Verify existing file was not modified.
@@ -136,7 +136,7 @@ func TestRunEnrich_SkipComplete(t *testing.T) {
 	err := cmd.Execute()
 	require.NoError(t, err)
 
-	assert.Contains(t, buf.String(), "0 errors")
+	assert.Contains(t, buf.String(), "0 failed")
 }
 
 // TestRunEnrich_TierAwareSkip_NoModel verifies that when no --model is
@@ -168,7 +168,7 @@ func TestRunEnrich_TierAwareSkip_NoModel(t *testing.T) {
 
 	// First run: Tier 1 enrichment happens.
 	first := runOnce()
-	assert.Contains(t, first, "Enriched 1 files")
+	assert.Contains(t, first, "Enriched 1.")
 
 	// Capture enriched file contents.
 	afterFirst, err := os.ReadFile(filePath)
@@ -177,7 +177,7 @@ func TestRunEnrich_TierAwareSkip_NoModel(t *testing.T) {
 	// Second run with no model: should SKIP (Tier-1-complete) — not re-enrich.
 	second := runOnce()
 	assert.Contains(t, second, "1 skipped", "second run without model must skip Tier-1-complete files")
-	assert.NotContains(t, second, "Enriched 1 files")
+	assert.NotContains(t, second, "Enriched 1.")
 
 	// File contents must be byte-identical (no rewrite).
 	afterSecond, err := os.ReadFile(filePath)
@@ -208,7 +208,7 @@ func TestRunEnrich_TierAwareSkip_ForceReprocesses(t *testing.T) {
 
 	require.NoError(t, cmd.Execute())
 
-	assert.Contains(t, buf.String(), "Enriched 1 files", "--force must re-process even Tier-1-complete files")
+	assert.Contains(t, buf.String(), "Enriched 1.", "--force must re-process even Tier-1-complete files")
 }
 
 func TestRunEnrich_Force(t *testing.T) {

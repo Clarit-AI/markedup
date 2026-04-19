@@ -752,7 +752,7 @@ func parseNuExtractEntities(content string) ([]schema.Entity, string, error) {
 	content = stripJSONFences(content)
 	repaired := repairNuExtractJSON([]byte(content))
 	if err := json.Unmarshal(repaired, &raw); err != nil {
-		return nil, "", fmt.Errorf("parse nuextract entities: %w\nraw: %s", err, truncate(content, 500))
+		return nil, "", fmt.Errorf("parse nuextract entities: %w (%w)\nraw: %s", ErrParse, err, truncate(content, 500))
 	}
 	return entitiesFromRaw(raw.Entities)
 }
@@ -764,7 +764,7 @@ func parseNuExtractRelations(content string) ([]schema.Relationship, error) {
 	content = stripJSONFences(content)
 	repaired := repairNuExtractJSON([]byte(content))
 	if err := json.Unmarshal(repaired, &raw); err != nil {
-		return nil, fmt.Errorf("parse nuextract relations: %w\nraw: %s", err, truncate(content, 500))
+		return nil, fmt.Errorf("parse nuextract relations: %w (%w)\nraw: %s", ErrParse, err, truncate(content, 500))
 	}
 	return relationshipsFromRaw(raw.Relationships), nil
 }
@@ -777,7 +777,7 @@ func parseNuExtractCombined(content string) ([]schema.Entity, []schema.Relations
 	content = stripJSONFences(content)
 	repaired := repairNuExtractJSON([]byte(content))
 	if err := json.Unmarshal(repaired, &raw); err != nil {
-		return nil, nil, "", fmt.Errorf("parse nuextract combined: %w\nraw: %s", err, truncate(content, 500))
+		return nil, nil, "", fmt.Errorf("parse nuextract combined: %w (%w)\nraw: %s", ErrParse, err, truncate(content, 500))
 	}
 	entities, entType, err := entitiesFromRaw(raw.Entities)
 	if err != nil {
