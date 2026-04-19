@@ -46,6 +46,27 @@ var cloudProviders = []providerChoice{
 	{label: "Ollama Cloud", endpoint: "https://api.ollama.com", kind: "cloud"},
 }
 
+// effectiveURL returns the full URL that will be hit for the given service
+// type ("embed", "llm", "rerank", "extractor"), built from a base endpoint.
+// Used by both the confirm screen and the input steps so the URL shown to
+// the user matches what the client actually calls. View-only — does not
+// affect stored config.
+func effectiveURL(base, service string) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if base == "" {
+		return ""
+	}
+	switch service {
+	case "embed":
+		return base + "/v1/embeddings"
+	case "rerank":
+		return base + "/v1/rerank"
+	case "llm", "extractor":
+		return base + "/v1/chat/completions"
+	}
+	return base
+}
+
 // rerankFormats are the internal config values for reranker request formats.
 // These must NOT be changed — they are stored in config YAML.
 var rerankFormats = []string{"jina", "openai"}
@@ -143,7 +164,8 @@ func (w welcomeStep) View(width int) string {
 type providerStep struct {
 	title         string
 	description   string
-	optional      bool // if true, shows "skip" first and is pre-selected
+	filterType    string // "embed", "llm", "rerank" — used for effective URL display
+	optional      bool   // if true, shows "skip" first and is pre-selected
 	choices       []providerChoice
 	cursor        int
 	phase         int // 0=choosing provider, 1=entering endpoint, 2=entering model, 3=choosing format (rerank only)
@@ -237,6 +259,7 @@ func newProviderStep(title, desc string, detected []config.Endpoint, filterType 
 	return providerStep{
 		title:        title,
 		description:  desc,
+		filterType:   filterType,
 		optional:     optional,
 		choices:      choices,
 		cursor:       startCursor,
@@ -411,11 +434,18 @@ func (p providerStep) View(width int) string {
 		b.WriteString(labelStyle.Render("Endpoint URL: "))
 		b.WriteString("\n")
 		b.WriteString(p.endpointIn.View())
-		b.WriteString("\n\n")
+		b.WriteString("\n")
+		// UX-12: live preview of the full effective URL the client will hit.
+		if eff := effectiveURL(p.endpointIn.Value(), p.filterType); eff != "" {
+			b.WriteString(mutedStyle.Render("→ " + eff))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
 		b.WriteString(helpStyle.Render("Enter: confirm  |  Esc: back  |  Ctrl+C: cancel"))
 
 	case 2:
-		b.WriteString(mutedStyle.Render(fmt.Sprintf("Endpoint: %s", p.selected.Endpoint)))
+		// UX-12: show the full effective URL the client will hit, not just the base.
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("Endpoint: %s", effectiveURL(p.selected.Endpoint, p.filterType))))
 		b.WriteString("\n\n")
 		b.WriteString(labelStyle.Render("Model name: "))
 		b.WriteString("\n")
@@ -424,7 +454,7 @@ func (p providerStep) View(width int) string {
 		b.WriteString(helpStyle.Render("Enter: confirm  |  Esc: back  |  Ctrl+C: cancel"))
 
 	case 3:
-		b.WriteString(mutedStyle.Render(fmt.Sprintf("Endpoint: %s  |  Model: %s", p.selected.Endpoint, p.selected.Model)))
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("Endpoint: %s  |  Model: %s", effectiveURL(p.selected.Endpoint, p.filterType), p.selected.Model)))
 		b.WriteString("\n\n")
 		b.WriteString(labelStyle.Render("Reranker format:"))
 		b.WriteString("\n")
@@ -618,7 +648,14 @@ func (t triplexStep) View(width int) string {
 	b.WriteString(labelStyle.Render("Endpoint URL:"))
 	b.WriteString("\n")
 	b.WriteString(t.endpointIn.View())
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	// UX-12: show full effective URL the client will hit (Triplex + NuExtract
+	// both use the OpenAI-compatible chat completions endpoint).
+	if eff := effectiveURL(t.endpointIn.Value(), "extractor"); eff != "" {
+		b.WriteString(mutedStyle.Render("→ " + eff))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
 	// Model input (editable, pre-filled with default).
 	b.WriteString(labelStyle.Render("Model:"))
@@ -927,7 +964,7 @@ func (c confirmStep) View(width int) string {
 	b.WriteString("\n")
 	if c.cfg.Embed.Endpoint != "" {
 		// UX-10: show effective URL with known path suffix for display only.
-		b.WriteString(fmt.Sprintf("  URL:      %s\n", c.cfg.Embed.Endpoint+"/v1/embeddings"))
+		b.WriteString(fmt.Sprintf("  URL:      %s\n", effectiveURL(c.cfg.Embed.Endpoint, "embed")))
 		b.WriteString(fmt.Sprintf("  Model:    %s\n", c.cfg.Embed.Model))
 	} else {
 		b.WriteString(mutedStyle.Render("  (not configured)"))
@@ -938,7 +975,7 @@ func (c confirmStep) View(width int) string {
 	b.WriteString(labelStyle.Render("LLM:"))
 	b.WriteString("\n")
 	if c.cfg.LLM.Endpoint != "" {
-		b.WriteString(fmt.Sprintf("  URL:      %s\n", c.cfg.LLM.Endpoint+"/v1/chat/completions"))
+		b.WriteString(fmt.Sprintf("  URL:      %s\n", effectiveURL(c.cfg.LLM.Endpoint, "llm")))
 		b.WriteString(fmt.Sprintf("  Model:    %s\n", c.cfg.LLM.Model))
 	} else {
 		b.WriteString(mutedStyle.Render("  (not configured)"))
@@ -949,7 +986,7 @@ func (c confirmStep) View(width int) string {
 	b.WriteString(labelStyle.Render("Reranker:"))
 	b.WriteString("\n")
 	if c.cfg.Rerank.Endpoint != "" {
-		b.WriteString(fmt.Sprintf("  URL:      %s\n", c.cfg.Rerank.Endpoint+"/v1/rerank"))
+		b.WriteString(fmt.Sprintf("  URL:      %s\n", effectiveURL(c.cfg.Rerank.Endpoint, "rerank")))
 		b.WriteString(fmt.Sprintf("  Model:    %s\n", c.cfg.Rerank.Model))
 		if c.format != "" {
 			b.WriteString(fmt.Sprintf("  Format:   %s\n", c.format))
