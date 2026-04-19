@@ -349,9 +349,17 @@ func MergeModelResult(existing schema.GraphFrontmatter, model *ModelResult, opts
 	result := existing
 
 	if opts.Force {
-		if model.EntityType != "" {
-			result.EntityType = strings.ToLower(model.EntityType)
+		// Whitelist + sticky-for-non-default: only accept canonical values, and
+		// preserve any prior non-"document" classification (user or prior
+		// confident run). "document" is the default fallback and may be
+		// promoted. See issue #128.
+		if schema.IsValidEntityType(model.EntityType) {
+			if existing.EntityType == "" || strings.ToLower(existing.EntityType) == "document" {
+				result.EntityType = strings.ToLower(model.EntityType)
+			}
+			// else: keep existing — don't let Tier 2 overwrite a real type.
 		}
+		// else: model returned empty or out-of-whitelist garbage → keep existing.
 		if model.Summary != "" {
 			result.Summary = model.Summary
 		}
@@ -374,8 +382,13 @@ func MergeModelResult(existing schema.GraphFrontmatter, model *ModelResult, opts
 	}
 
 	// Default: fill missing, union arrays.
-	if result.EntityType == "" && model.EntityType != "" {
-		result.EntityType = strings.ToLower(model.EntityType)
+	// Whitelist + sticky-for-non-default: same policy as force branch, see #128.
+	// In default mode the check collapses to "fill if existing is empty or
+	// default (document)" — a real existing type is never overwritten.
+	if schema.IsValidEntityType(model.EntityType) {
+		if result.EntityType == "" || strings.ToLower(result.EntityType) == "document" {
+			result.EntityType = strings.ToLower(model.EntityType)
+		}
 	}
 	if result.Summary == "" && model.Summary != "" {
 		result.Summary = model.Summary
