@@ -19,6 +19,12 @@ func TestRepairNuExtractJSON_ValidUnchanged(t *testing.T) {
 		`{"relationships":[]}`,
 		`{"entities":[{"name":"LM Studio","type":["TECHNOLOGY"]}]}`,
 		`{"entities":[{"name":"Dr. }]{ Chen","type":"PERSON"}]}`, // braces inside a string value — must not fool the repairer.
+		// Pattern F regression guard: the substring `"type:"` appears
+		// INSIDE a JSON string value (escaped quotes unescape to
+		// `See "type:" docs`). The walker must not rewrite it, because
+		// doing so would corrupt a legitimate value. Also exercises the
+		// escape-handling path of the string-aware walker.
+		`{"entities":[{"name":"x","type":"PERSON"}],"notes":"See \"type:\" docs and \"subject:\" notes"}`,
 	}
 	for _, in := range inputs {
 		got := repairNuExtractJSON([]byte(in))
@@ -108,6 +114,45 @@ func TestRepairNuExtractJSON_PatternE_TruncatedTrailingBrace(t *testing.T) {
 	assert.Equal(t, "system", parsed.Entities[3].Name)
 }
 
+// Pattern F — the closing quote on the KEY name got eaten, producing
+// `"type:"VALUE"` which JSON parses as string `"type:"` plus a stray bare
+// token. Uses the exact IRL payload from issue #133.
+func TestRepairNuExtractJSON_PatternF_MissingKeyClosingQuote(t *testing.T) {
+	bad := `{"entities":[{"name":"markedup_search","type:"TECHNOLOGY"}, {"name":"markedup_traverse","type:"TECHNOLOGY"}]}`
+	got := repairNuExtractJSON([]byte(bad))
+
+	var parsed struct {
+		Entities []nuextractEntity `json:"entities"`
+	}
+	require.NoError(t, json.Unmarshal(got, &parsed),
+		"repaired payload must be valid JSON: %s", string(got))
+	require.Len(t, parsed.Entities, 2)
+	assert.Equal(t, "markedup_search", parsed.Entities[0].Name)
+	assert.Equal(t, "TECHNOLOGY", string(parsed.Entities[0].Type))
+	assert.Equal(t, "markedup_traverse", parsed.Entities[1].Name)
+	assert.Equal(t, "TECHNOLOGY", string(parsed.Entities[1].Type))
+}
+
+// Pattern F coverage across all five known keys. Each fixture has exactly
+// one corrupted key; the repair must restore every one.
+func TestRepairNuExtractJSON_PatternF_AllKnownKeys(t *testing.T) {
+	cases := map[string]string{
+		"name":      `{"entities":[{"name:"x","type":"PERSON"}]}`,
+		"type":      `{"entities":[{"name":"x","type:"PERSON"}]}`,
+		"subject":   `{"relationships":[{"subject:"a","predicate":"uses","object":"b"}]}`,
+		"predicate": `{"relationships":[{"subject":"a","predicate:"uses","object":"b"}]}`,
+		"object":    `{"relationships":[{"subject":"a","predicate":"uses","object:"b"}]}`,
+	}
+	for key, bad := range cases {
+		t.Run(key, func(t *testing.T) {
+			got := repairNuExtractJSON([]byte(bad))
+			var v any
+			require.NoError(t, json.Unmarshal(got, &v),
+				"repaired payload must be valid JSON for key=%s: %s", key, string(got))
+		})
+	}
+}
+
 // End-to-end: parseNuExtractEntities must recover entities from each
 // malformed payload rather than erroring out. Covers the real caller path
 // including stripJSONFences + repair + Unmarshal.
@@ -131,6 +176,10 @@ func TestParseNuExtractEntities_ToleratesAllPatterns(t *testing.T) {
 		"patternD_IRL1": {
 			raw:       `{"entities":[{"name":"markedup", "type":["TECHNOLOGY"]}, {"name":"Go Library Usage Guide", "type":["CONCEPT"}]}`,
 			wantNames: []string{"markedup", "Go Library Usage Guide"},
+		},
+		"patternF_IRL": {
+			raw:       `{"entities":[{"name":"markedup_search","type:"TECHNOLOGY"}, {"name":"markedup_traverse","type:"TECHNOLOGY"}]}`,
+			wantNames: []string{"markedup_search", "markedup_traverse"},
 		},
 		"patternE_IRL2": {
 			raw:       `{"entities":[{"name":"Alice Chen","type":"person","confidence":0.95,"alias":["alice", "Dr. Chen"]}, {"name":"bob","type":"person","confidence":1.0,"alias":["colleague"]}, {"name":"concept-graph","type":"project","confidence":1.0,"alias":["studies"]}, {"name":"system", "type":"person", "confidence":1.0}]`,
@@ -168,6 +217,7 @@ func TestRepairSubpasses_NoOpOnUnrelatedInput(t *testing.T) {
 	clean := []byte(`{"entities":[{"name":"A","type":"PERSON"}]}`)
 	assert.Equal(t, string(clean), string(repairConcatenatedObjects(clean)))
 	assert.Equal(t, string(clean), string(repairMissingColonBeforeArray(clean)))
+	assert.Equal(t, string(clean), string(repairMissingKeyClosingQuote(clean)))
 	assert.Equal(t, string(clean), string(repairBracketBraceMismatch(clean)))
 	assert.Equal(t, string(clean), string(repairTruncatedTrailingBrace(clean)))
 }

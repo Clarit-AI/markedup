@@ -264,6 +264,11 @@ func (m *ModelExtractor) nuExtractSingle(ctx context.Context, entityTypes, predi
 //	E. Truncated trailing close: when the payload opens N braces and
 //	   closes only N-1, append a single '}'. We only append one brace —
 //	   deeper truncation is left for the caller's error path.
+//	F. Missing closing quote on the KEY name, e.g. '"type:"VALUE"' —
+//	   parses as string '"type:"' followed by bare token 'VALUE"'. We
+//	   rewrite to '"type":"VALUE"' only for the five known NuExtract keys
+//	   (name / type / subject / predicate / object), and only when the
+//	   sequence is encountered outside of a JSON string value.
 //
 // The function always returns a []byte (never nil); callers can safely
 // pass the result straight to json.Unmarshal.
@@ -278,6 +283,9 @@ func repairNuExtractJSON(raw []byte) []byte {
 
 	// Patterns B + C — missing colon (and/or closing key quote) before '['.
 	out = repairMissingColonBeforeArray(out)
+
+	// Pattern F — missing closing quote on known key names before ':"'.
+	out = repairMissingKeyClosingQuote(out)
 
 	// Pattern D — mismatched '}' where a ']' is expected inside an array.
 	out = repairBracketBraceMismatch(out)
@@ -411,6 +419,132 @@ func repairMissingColonBeforeArray(raw []byte) []byte {
 		return raw
 	}
 	return []byte(s)
+}
+
+// nuExtractKnownKeys is the closed set of JSON keys NuExtract emits. Pattern F
+// only rewrites when the corrupted token exactly matches one of these — we
+// refuse to speculate about arbitrary identifiers because the fix inserts a
+// quote into the byte stream.
+var nuExtractKnownKeys = []string{"name", "type", "subject", "predicate", "object"}
+
+// repairMissingKeyClosingQuote fixes Pattern F: the model drops the closing
+// quote on a KEY name, producing e.g. `"type:"VALUE"` which the JSON parser
+// reads as the string `"type:"` followed by a stray bare word. The target
+// rewrite is `"type:"` → `"type":"` — insert the missing closing quote
+// between the key name and the colon that's already followed by an opening
+// quote.
+//
+// The walker is string-aware (tracks JSON string context with escape
+// handling) so a value that legitimately contains the substring
+// (e.g. `{"desc":"See \"type:\" docs"}`) is left untouched. We also require
+// brace depth >= 1 to skip any speculative match at the document root.
+func repairMissingKeyClosingQuote(raw []byte) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+	// Quick reject: if no ':"' sequence exists, nothing to do.
+	if !strings.Contains(string(raw), `:"`) {
+		return raw
+	}
+	out := make([]byte, 0, len(raw)+8)
+	depth := 0
+	inStr := false
+	escape := false
+	i := 0
+	for i < len(raw) {
+		c := raw[i]
+		if inStr {
+			out = append(out, c)
+			if escape {
+				escape = false
+				i++
+				continue
+			}
+			if c == '\\' {
+				escape = true
+				i++
+				continue
+			}
+			if c == '"' {
+				inStr = false
+			}
+			i++
+			continue
+		}
+		switch c {
+		case '"':
+			// Candidate start of either a string value or a malformed key.
+			// Try to match `"<known-key>:"` exactly at this position while
+			// we're outside of a string and at depth >= 1.
+			if depth >= 1 {
+				if matched, keyLen := matchKnownKeyPatternF(raw, i); matched {
+					// raw[i .. i+1+keyLen+2] is `"<key>:"` — rewrite to
+					// `"<key>":"` by emitting an extra '"' before the ':'.
+					// Layout in source: '"' keyLen bytes ':' '"'
+					// Layout in output: '"' keyLen bytes '"' ':' '"'
+					out = append(out, '"')
+					out = append(out, raw[i+1:i+1+keyLen]...)
+					out = append(out, '"', ':', '"')
+					i += 1 + keyLen + 2
+					// The trailing '"' we just emitted opens the VALUE
+					// string. Enter string context so its contents — and
+					// its closing '"' — are handled correctly.
+					inStr = true
+					continue
+				}
+			}
+			// Not a Pattern F match — enter a regular JSON string.
+			out = append(out, c)
+			inStr = true
+			i++
+			continue
+		case '{', '[':
+			depth++
+			out = append(out, c)
+			i++
+			continue
+		case '}', ']':
+			if depth > 0 {
+				depth--
+			}
+			out = append(out, c)
+			i++
+			continue
+		default:
+			out = append(out, c)
+			i++
+		}
+	}
+	// If we never rewrote anything the outputs are byte-equal; return the
+	// original slice so callers (and tests) see true identity for clean
+	// inputs.
+	if len(out) == len(raw) {
+		return raw
+	}
+	return out
+}
+
+// matchKnownKeyPatternF checks whether raw[i:] begins with the exact byte
+// sequence `"<known-key>:"` for one of the NuExtract keys. On a match it
+// returns (true, len(key)); otherwise (false, 0). The caller has already
+// verified raw[i] == '"'.
+func matchKnownKeyPatternF(raw []byte, i int) (bool, int) {
+	for _, key := range nuExtractKnownKeys {
+		// Need room for: '"' + key + ':' + '"' == len(key)+3 bytes after i.
+		end := i + 1 + len(key) + 2
+		if end > len(raw) {
+			continue
+		}
+		// raw[i] is '"' (caller checked). Compare key bytes.
+		if string(raw[i+1:i+1+len(key)]) != key {
+			continue
+		}
+		if raw[i+1+len(key)] != ':' || raw[i+1+len(key)+1] != '"' {
+			continue
+		}
+		return true, len(key)
+	}
+	return false, 0
 }
 
 // repairBracketBraceMismatch fixes Pattern D: a `}` appears where the
