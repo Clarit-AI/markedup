@@ -247,6 +247,70 @@ func newProviderStep(title, desc string, detected []config.Endpoint, filterType 
 	}
 }
 
+// newProviderStepWithCurrent is a reconfigure-mode variant of newProviderStep
+// (issue #116) that pre-fills the model input with the user's currently-
+// configured model for this service. If the current endpoint matches one of the
+// detected/cloud choices, the cursor is positioned on it so Enter pre-fills
+// both endpoint AND model. Otherwise the cursor lands on "Custom endpoint" and
+// the endpoint input is pre-filled with the current value.
+//
+// When current.Endpoint is "" the function behaves exactly like newProviderStep
+// — callers can safely call this in first-run mode too.
+func newProviderStepWithCurrent(title, desc string, detected []config.Endpoint, filterType string, optional bool, showFormat bool, current config.ServiceConfig) providerStep {
+	p := newProviderStep(title, desc, detected, filterType, optional, showFormat)
+	if current.Endpoint == "" && current.Model == "" {
+		return p
+	}
+
+	// Always seed the model input with the current model so it's the default
+	// suggestion when the user enters phase 2.
+	if current.Model != "" {
+		p.modelIn.SetValue(current.Model)
+		p.selected.Model = current.Model
+	}
+	if current.Endpoint != "" {
+		p.selected.Endpoint = current.Endpoint
+	}
+
+	// Try to position the cursor on a choice that matches the current endpoint.
+	matched := false
+	for i, c := range p.choices {
+		if c.endpoint != "" && c.endpoint == current.Endpoint {
+			p.cursor = i
+			matched = true
+			break
+		}
+	}
+	if !matched && current.Endpoint != "" {
+		// No preset matches — point at "Custom endpoint" and pre-fill the
+		// endpoint input so Enter on Custom shows the current value.
+		for i, c := range p.choices {
+			if c.kind == "custom" {
+				p.cursor = i
+				break
+			}
+		}
+		p.endpointIn.SetValue(current.Endpoint)
+	}
+
+	return p
+}
+
+// newTriplexStepWithCurrent is a reconfigure-mode variant of newTriplexStep
+// (issue #116) that pre-fills the endpoint and model inputs with the user's
+// currently-configured extractor (Triplex or NuExtract). If both are empty the
+// function falls back to newTriplexStep's defaults.
+func newTriplexStepWithCurrent(detected []config.Endpoint, current config.ServiceConfig) triplexStep {
+	t := newTriplexStep(detected)
+	if current.Endpoint != "" {
+		t.endpointIn.SetValue(current.Endpoint)
+	}
+	if current.Model != "" {
+		t.modelIn.SetValue(current.Model)
+	}
+	return t
+}
+
 // looksLikeEmbedModel returns true if the model name contains patterns that
 // indicate it is an embedding model (rather than a generative LLM).
 func looksLikeEmbedModel(name string) bool {

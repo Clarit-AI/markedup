@@ -285,6 +285,11 @@ func (m Model) updateHome(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.wizard = setup.NewWizardModel()
 				m.wizard.SetEmbedded(true)
 				m.wizard.SetSize(m.width, m.height)
+				// Reconfigure mode (#115/#116): pass the loaded config so the
+				// wizard shows a section menu and pre-fills inputs.
+				if m.cfg != nil {
+					m.wizard.SetReconfigure(m.cfg)
+				}
 				m.current = viewSetup
 				return m, m.wizard.Init()
 			}
