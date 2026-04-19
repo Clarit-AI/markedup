@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -11,6 +12,89 @@ import (
 
 	"github.com/Clarit-AI/markedup/config"
 )
+
+// ---------------------------------------------------------------------------
+// Test Connection (#118) — shared message + helper
+// ---------------------------------------------------------------------------
+
+// needsKeyMessage is the inline hint shown when the user presses the Test
+// Connection key on an endpoint that requires an API key. The key is not
+// collected until a later wizard step, so probing now would always 401.
+const needsKeyMessage = "Set API key in Keys step before testing this endpoint"
+
+// endpointNeedsKey is the canonical heuristic for "does this endpoint need
+// an API key" — kept here so providerStep, triplexStep, and the Test
+// Connection guard all agree. Loopback addresses are assumed key-less.
+func endpointNeedsKey(endpoint string) bool {
+	if endpoint == "" {
+		return false
+	}
+	lower := strings.ToLower(endpoint)
+	return !strings.Contains(lower, "localhost") && !strings.Contains(lower, "127.0.0.1")
+}
+
+// probeResultMsg carries a Test Connection probe outcome back to the wizard
+// step that initiated it. Step is the destination ("embed", "llm", "rerank",
+// "triplex", "nuextract") so the parent can route the result to the right
+// sub-model when multiple steps live in the same wizard.
+type probeResultMsg struct {
+	step   string
+	result config.ProbeResult
+}
+
+// probeCmd builds a tea.Cmd that runs ProbeService off the UI goroutine and
+// returns probeResultMsg. A 12s context deadline matches ProbeTimeout +
+// network slack.
+func probeCmd(step, service, endpoint, model, apiKey string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		return probeResultMsg{
+			step:   step,
+			result: config.ProbeService(ctx, service, endpoint, model, apiKey),
+		}
+	}
+}
+
+// filterModelsByRole returns the subset of models whose name heuristically
+// matches the given service role ("embed", "llm", "rerank"). When no models
+// match, the full list is returned so the user can still pick something
+// rather than being stuck with an empty picker.
+func filterModelsByRole(models []string, role string) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	var matched []string
+	for _, m := range models {
+		lower := strings.ToLower(m)
+		switch role {
+		case "embed":
+			if strings.Contains(lower, "embed") || strings.Contains(lower, "minilm") ||
+				strings.Contains(lower, "bge-m") || strings.Contains(lower, "bge-l") ||
+				strings.Contains(lower, "bge-s") || strings.Contains(lower, "e5") ||
+				strings.Contains(lower, "nomic") || strings.Contains(lower, "gte") {
+				if !strings.Contains(lower, "rerank") {
+					matched = append(matched, m)
+				}
+			}
+		case "rerank":
+			if strings.Contains(lower, "rerank") || strings.Contains(lower, "cross-encoder") {
+				matched = append(matched, m)
+			}
+		case "llm":
+			// Exclude obvious embedding / rerank model names.
+			if strings.Contains(lower, "embed") || strings.Contains(lower, "rerank") ||
+				strings.Contains(lower, "minilm") || strings.Contains(lower, "cross-encoder") {
+				continue
+			}
+			matched = append(matched, m)
+		}
+	}
+	if len(matched) == 0 {
+		return models
+	}
+	return matched
+}
 
 // ---------------------------------------------------------------------------
 // Messages
@@ -178,6 +262,20 @@ type providerStep struct {
 	formatVal     string
 	done          bool
 	embedWarning  bool   // true if detected models look like LLM models, not embedding models
+
+	// Model picker state (#111). When pickerModels is non-empty, phase 2
+	// shows a selectable list. Pressing 'm' switches to free-text input
+	// (pickerActive=false) for one-off custom names.
+	role          string   // "embed", "llm", "rerank" — drives filter heuristic
+	pickerModels  []string // filtered model list shown to user
+	pickerCursor  int
+	pickerActive  bool
+
+	// Test Connection state (#118). probeRunning hides the result while a
+	// probe is in flight; probeResult carries the latest outcome.
+	serviceName  string // canonical service name passed to ProbeService
+	probeRunning bool
+	probeResult  *config.ProbeResult
 }
 
 // selectedProviderLabel returns a human-readable label for the chosen provider,
@@ -256,6 +354,12 @@ func newProviderStep(title, desc string, detected []config.Endpoint, filterType 
 		}
 	}
 
+	// Map filterType → service name used by Test Connection probes.
+	svcName := filterType
+	if filterType == "" {
+		svcName = "llm"
+	}
+
 	return providerStep{
 		title:        title,
 		description:  desc,
@@ -267,6 +371,8 @@ func newProviderStep(title, desc string, detected []config.Endpoint, filterType 
 		modelIn:      mi,
 		showFormat:   showFormat,
 		embedWarning: embedWarning,
+		role:         filterType,
+		serviceName:  svcName,
 	}
 }
 
@@ -346,6 +452,18 @@ func looksLikeEmbedModel(name string) bool {
 }
 
 func (p providerStep) Update(msg tea.Msg) (providerStep, tea.Cmd) {
+	// Test Connection result handler — accept regardless of phase. The
+	// step filter ensures probes initiated by another step do not overwrite
+	// state here.
+	if pr, ok := msg.(probeResultMsg); ok {
+		if pr.step == p.serviceName {
+			res := pr.result
+			p.probeResult = &res
+			p.probeRunning = false
+		}
+		return p, nil
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch p.phase {
@@ -367,18 +485,28 @@ func (p providerStep) Update(msg tea.Msg) (providerStep, tea.Cmd) {
 					return p, nil
 				case "detected":
 					p.selected.Endpoint = choice.endpoint
-					if len(choice.models) > 0 {
-						p.selected.Model = choice.models[0]
-					}
-					// Go to model entry to let user confirm/override.
 					p.phase = 2
-					p.modelIn.SetValue(p.selected.Model)
-					p.modelIn.Focus()
+					// #111: when models are known, show a selectable picker
+					// instead of free-text. Filter by role heuristic but fall
+					// back to the full list when nothing matches.
+					if len(choice.models) > 0 {
+						p.pickerModels = filterModelsByRole(choice.models, p.role)
+						p.pickerActive = true
+						p.pickerCursor = 0
+						p.selected.Model = p.pickerModels[0]
+						p.modelIn.SetValue(p.selected.Model)
+					} else {
+						p.pickerActive = false
+						p.modelIn.Focus()
+					}
+					p.probeResult = nil
 					return p, textinput.Blink
 				case "cloud":
 					p.selected.Endpoint = choice.endpoint
 					p.needsKey = true
 					p.phase = 2
+					p.pickerActive = false
+					p.probeResult = nil
 					p.modelIn.Focus()
 					return p, textinput.Blink
 				case "custom":
@@ -397,6 +525,8 @@ func (p providerStep) Update(msg tea.Msg) (providerStep, tea.Cmd) {
 				p.selected.Endpoint = val
 				p.needsKey = true // assume custom needs a key
 				p.phase = 2
+				p.pickerActive = false
+				p.probeResult = nil
 				p.modelIn.Focus()
 				return p, textinput.Blink
 			case "esc":
@@ -407,7 +537,79 @@ func (p providerStep) Update(msg tea.Msg) (providerStep, tea.Cmd) {
 				p.endpointIn, cmd = p.endpointIn.Update(msg)
 				return p, cmd
 			}
-		case 2: // entering model name
+		case 2: // entering model name (picker or free-text)
+			// Test Connection (#118) — works in both picker and free-text modes.
+			// Bound to ctrl+t to avoid clobbering literal 't' keystrokes when
+			// the user is typing a model name. In picker mode plain 't' also
+			// triggers the probe (no text input is focused).
+			if msg.String() == "ctrl+t" || (p.pickerActive && msg.String() == "t") {
+				model := p.selected.Model
+				if !p.pickerActive {
+					model = strings.TrimSpace(p.modelIn.Value())
+				}
+				if model == "" || p.selected.Endpoint == "" || p.probeRunning {
+					return p, nil
+				}
+				// Cloud guard: API key is collected in a later step, so probing
+				// a needsKey endpoint with no key in hand will always 401.
+				// Show an inline hint instead of dispatching the request.
+				if p.needsKey {
+					p.probeRunning = false
+					p.probeResult = &config.ProbeResult{
+						OK:     false,
+						Detail: needsKeyMessage,
+					}
+					return p, nil
+				}
+				p.probeRunning = true
+				p.probeResult = nil
+				return p, probeCmd(p.serviceName, p.serviceName, p.selected.Endpoint, model, "")
+			}
+
+			if p.pickerActive {
+				switch msg.String() {
+				case "up":
+					if p.pickerCursor > 0 {
+						p.pickerCursor--
+						p.selected.Model = p.pickerModels[p.pickerCursor]
+						p.modelIn.SetValue(p.selected.Model)
+						p.probeResult = nil
+					}
+					return p, nil
+				case "down":
+					if p.pickerCursor < len(p.pickerModels)-1 {
+						p.pickerCursor++
+						p.selected.Model = p.pickerModels[p.pickerCursor]
+						p.modelIn.SetValue(p.selected.Model)
+						p.probeResult = nil
+					}
+					return p, nil
+				case "m":
+					// Switch to free-text input for a custom model name.
+					p.pickerActive = false
+					p.modelIn.Focus()
+					return p, textinput.Blink
+				case "enter":
+					if len(p.pickerModels) == 0 {
+						return p, nil
+					}
+					p.selected.Model = p.pickerModels[p.pickerCursor]
+					if p.showFormat {
+						p.phase = 3
+						return p, nil
+					}
+					p.done = true
+					return p, nil
+				case "esc":
+					p.phase = 0
+					p.pickerActive = false
+					p.probeResult = nil
+					return p, nil
+				}
+				return p, nil
+			}
+
+			// Free-text model entry.
 			switch msg.String() {
 			case "enter":
 				val := strings.TrimSpace(p.modelIn.Value())
@@ -423,6 +625,7 @@ func (p providerStep) Update(msg tea.Msg) (providerStep, tea.Cmd) {
 				return p, nil
 			case "esc":
 				p.phase = 0
+				p.probeResult = nil
 				return p, nil
 			default:
 				var cmd tea.Cmd
@@ -462,6 +665,21 @@ func (p providerStep) Update(msg tea.Msg) (providerStep, tea.Cmd) {
 		}
 	}
 	return p, nil
+}
+
+// renderProbeStatus formats the most recent Test Connection probe outcome for
+// inline display. Empty string when no probe has run.
+func (p providerStep) renderProbeStatus() string {
+	if p.probeRunning {
+		return mutedStyle.Render("Testing connection...") + "\n\n"
+	}
+	if p.probeResult == nil {
+		return ""
+	}
+	if p.probeResult.OK {
+		return successStyle.Render("✓ Connected") + " " + mutedStyle.Render("("+p.probeResult.Detail+")") + "\n\n"
+	}
+	return warningStyle.Render("✗ Failed") + " " + mutedStyle.Render(p.probeResult.Detail) + "\n\n"
 }
 
 func (p providerStep) View(width int) string {
@@ -511,11 +729,30 @@ func (p providerStep) View(width int) string {
 		// UX-12: show the full effective URL the client will hit, not just the base.
 		b.WriteString(mutedStyle.Render(fmt.Sprintf("Endpoint: %s", effectiveURL(p.selected.Endpoint, p.filterType))))
 		b.WriteString("\n\n")
-		b.WriteString(labelStyle.Render("Model name: "))
-		b.WriteString("\n")
-		b.WriteString(p.modelIn.View())
-		b.WriteString("\n\n")
-		b.WriteString(helpStyle.Render("Enter: confirm  |  Esc: back  |  Ctrl+C: cancel"))
+		if p.pickerActive {
+			b.WriteString(labelStyle.Render("Choose a model: "))
+			b.WriteString("\n")
+			for i, m := range p.pickerModels {
+				prefix := "  "
+				style := subtitleStyle
+				if i == p.pickerCursor {
+					prefix = "> "
+					style = selectedStyle
+				}
+				b.WriteString(style.Render(prefix + m))
+				b.WriteString("\n")
+			}
+			b.WriteString("\n")
+			b.WriteString(p.renderProbeStatus())
+			b.WriteString(helpStyle.Render("up/down: navigate  |  Enter: select  |  t: test connection  |  m: enter custom  |  Esc: back"))
+		} else {
+			b.WriteString(labelStyle.Render("Model name: "))
+			b.WriteString("\n")
+			b.WriteString(p.modelIn.View())
+			b.WriteString("\n\n")
+			b.WriteString(p.renderProbeStatus())
+			b.WriteString(helpStyle.Render("Enter: confirm  |  Ctrl+T: test connection  |  Esc: back  |  Ctrl+C: cancel"))
+		}
 
 	case 3:
 		b.WriteString(mutedStyle.Render(fmt.Sprintf("Endpoint: %s  |  Model: %s", effectiveURL(p.selected.Endpoint, p.filterType), p.selected.Model)))
@@ -564,6 +801,10 @@ type triplexStep struct {
 	selected   config.ServiceConfig
 	// skipCursor: 0 = endpoint input focused, 1 = model input focused, 2 = Skip option highlighted
 	skipCursor int
+
+	// Test Connection state (#118).
+	probeRunning bool
+	probeResult  *config.ProbeResult
 }
 
 // newTriplexStep creates the Triplex configuration step.
@@ -599,8 +840,49 @@ func newTriplexStep(detected []config.Endpoint) triplexStep {
 }
 
 func (t triplexStep) Update(msg tea.Msg) (triplexStep, tea.Cmd) {
+	// Test Connection result handler. Routes either "triplex" or "nuextract"
+	// based on the model id the user entered.
+	if pr, ok := msg.(probeResultMsg); ok {
+		if pr.step == "triplex" || pr.step == "nuextract" {
+			res := pr.result
+			t.probeResult = &res
+			t.probeRunning = false
+		}
+		return t, nil
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Ctrl+T runs Test Connection from any focus state. Picks the right
+		// service based on whether the model id is a NuExtract-2.0 model.
+		if msg.String() == "ctrl+t" {
+			ep := strings.TrimSpace(t.endpointIn.Value())
+			model := strings.TrimSpace(t.modelIn.Value())
+			if model == "" {
+				model = triplexModelName
+			}
+			if ep == "" || t.probeRunning {
+				return t, nil
+			}
+			svc := "triplex"
+			if config.IsNuExtractModel(model) {
+				svc = "nuextract"
+			}
+			// Cloud guard: same logic as the Enter handler below — non-loopback
+			// endpoints assume an API key, which isn't available until the Keys
+			// step. Skip the probe and surface a hint instead of guaranteed 401.
+			if endpointNeedsKey(ep) {
+				t.probeRunning = false
+				t.probeResult = &config.ProbeResult{
+					OK:     false,
+					Detail: needsKeyMessage,
+				}
+				return t, nil
+			}
+			t.probeRunning = true
+			t.probeResult = nil
+			return t, probeCmd(svc, svc, ep, model, "")
+		}
 		switch msg.String() {
 		case "s", "S":
 			// S key skips directly (only when not typing in an input).
@@ -736,7 +1018,24 @@ func (t triplexStep) View(width int) string {
 	}
 	b.WriteString("\n\n")
 
-	b.WriteString(helpStyle.Render("Enter: confirm  |  Tab/↑↓: navigate  |  Esc: back  |  Ctrl+C: cancel"))
+	// Probe status (#118).
+	if t.probeRunning {
+		b.WriteString(mutedStyle.Render("Testing connection..."))
+		b.WriteString("\n\n")
+	} else if t.probeResult != nil {
+		if t.probeResult.OK {
+			b.WriteString(successStyle.Render("✓ Connected"))
+			b.WriteString(" ")
+			b.WriteString(mutedStyle.Render("(" + t.probeResult.Detail + ")"))
+		} else {
+			b.WriteString(warningStyle.Render("✗ Failed"))
+			b.WriteString(" ")
+			b.WriteString(mutedStyle.Render(t.probeResult.Detail))
+		}
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString(helpStyle.Render("Enter: confirm  |  Tab/↑↓: navigate  |  Ctrl+T: test connection  |  Esc: back  |  Ctrl+C: cancel"))
 	return b.String()
 }
 
