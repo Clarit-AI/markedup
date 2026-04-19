@@ -243,6 +243,294 @@ func (m *ModelExtractor) nuExtractSingle(ctx context.Context, entityTypes, predi
 	}, nil
 }
 
+// repairNuExtractJSON applies a conservative, pattern-targeted sequence of
+// textual repairs to NuExtract responses. It is a best-effort pre-pass in
+// front of json.Unmarshal: every repair first checks for a specific
+// known-bad signature and only mutates bytes when matched. Valid JSON flows
+// through unchanged.
+//
+// Handled patterns (see issue #107):
+//
+//	A. Two top-level objects concatenated by a comma:
+//	   '{"entities":[…]}, {"relationships":[…]}' → merged into one object.
+//	B. Missing colon between an object key and its array value:
+//	   '{"entities […]}' → '{"entities": […]}'. Also covers the
+//	   "key lost its closing quote" variant (Pattern C) when followed by ' ['.
+//	C. Missing closing quote on the key (covered by B's detector).
+//	D. Bracket/brace mismatch inside an array element, e.g.
+//	   '"type":["CONCEPT"}]' → '"type":["CONCEPT"]}'. We flip the pair
+//	   only when we detect `"]` immediately followed by `}` where an
+//	   earlier `{` is still open at the same nesting level.
+//	E. Truncated trailing close: when the payload opens N braces and
+//	   closes only N-1, append a single '}'. We only append one brace —
+//	   deeper truncation is left for the caller's error path.
+//
+// The function always returns a []byte (never nil); callers can safely
+// pass the result straight to json.Unmarshal.
+func repairNuExtractJSON(raw []byte) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+	out := raw
+
+	// Pattern A — "}, {" joining two top-level objects.
+	out = repairConcatenatedObjects(out)
+
+	// Patterns B + C — missing colon (and/or closing key quote) before '['.
+	out = repairMissingColonBeforeArray(out)
+
+	// Pattern D — mismatched '}' where a ']' is expected inside an array.
+	out = repairBracketBraceMismatch(out)
+
+	// Pattern E — single missing trailing '}'.
+	out = repairTruncatedTrailingBrace(out)
+
+	return out
+}
+
+// repairConcatenatedObjects collapses the exact NuExtract "single-mode
+// concatenated" pattern: `}, {` joining two top-level objects that each
+// hold one of the expected keys ("entities" / "relationships"). We only
+// rewrite when BOTH halves look like the well-known NuExtract shape,
+// otherwise a legitimate `}, {` inside an array (impossible at top level
+// but possible for future schemas) would be corrupted.
+func repairConcatenatedObjects(raw []byte) []byte {
+	s := string(raw)
+	trimmed := strings.TrimSpace(s)
+	if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
+		return raw
+	}
+	// Find a top-level `}, {` — i.e. at brace-depth 0 outside of strings.
+	idx, ok := findTopLevelObjectJoin(trimmed)
+	if !ok {
+		return raw
+	}
+	left := trimmed[:idx]    // includes closing '}'
+	right := trimmed[idx+1:] // starts with ' {' or ', {' remnant
+	right = strings.TrimLeft(right, ", \t\n\r")
+	if !strings.HasPrefix(right, "{") {
+		return raw
+	}
+	// Require both halves to hold a NuExtract-shaped key.
+	if !containsAnyKey(left, `"entities"`, `"relationships"`) ||
+		!containsAnyKey(right, `"entities"`, `"relationships"`) {
+		return raw
+	}
+	// Drop closing '}' of left, drop opening '{' of right, join with ','.
+	leftInner := strings.TrimSuffix(left, "}")
+	rightInner := strings.TrimPrefix(right, "{")
+	merged := leftInner + "," + rightInner
+	return []byte(merged)
+}
+
+// findTopLevelObjectJoin returns the index of the '}' in the first
+// top-level `}, {` sequence (depth == 0 immediately after the '}').
+func findTopLevelObjectJoin(s string) (int, bool) {
+	depth := 0
+	inStr := false
+	escape := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			if escape {
+				escape = false
+				continue
+			}
+			if c == '\\' {
+				escape = true
+				continue
+			}
+			if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+			if c == '}' && depth == 0 {
+				// Look ahead for ", {" — possibly with whitespace.
+				j := i + 1
+				for j < len(s) && (s[j] == ' ' || s[j] == '\t' || s[j] == '\n' || s[j] == '\r') {
+					j++
+				}
+				if j < len(s) && s[j] == ',' {
+					k := j + 1
+					for k < len(s) && (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r') {
+						k++
+					}
+					if k < len(s) && s[k] == '{' {
+						return i, true
+					}
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+func containsAnyKey(s string, keys ...string) bool {
+	for _, k := range keys {
+		if strings.Contains(s, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// repairMissingColonBeforeArray fixes Patterns B and C: the model writes
+// `{"entities [` (no colon, and sometimes no closing quote on the key)
+// instead of `{"entities": [`. We look for an identifier-like token that
+// should be a quoted key, followed by optional whitespace and `[`, with
+// no `:` between them. Only the three NuExtract top-level keys are
+// candidates — we refuse to speculate about arbitrary identifiers.
+func repairMissingColonBeforeArray(raw []byte) []byte {
+	s := string(raw)
+	candidates := []string{"entities", "relationships"}
+	changed := false
+	for _, key := range candidates {
+		// Variant 1 (Pattern B): "entities [   — closing quote present, colon missing.
+		bad := `"` + key + `" [`
+		good := `"` + key + `": [`
+		if strings.Contains(s, bad) && !strings.Contains(s, good) {
+			s = strings.ReplaceAll(s, bad, good)
+			changed = true
+		}
+		// Variant 2 (Pattern C): "entities [   — closing quote missing too.
+		badNoClose := `"` + key + ` [`
+		if strings.Contains(s, badNoClose) && !strings.Contains(s, good) {
+			s = strings.ReplaceAll(s, badNoClose, good)
+			changed = true
+		}
+	}
+	if !changed {
+		return raw
+	}
+	return []byte(s)
+}
+
+// repairBracketBraceMismatch fixes Pattern D: a `}` appears where the
+// current open frame is an array, meaning the model swapped `]` for `}`.
+// We walk the byte stream keeping a stack of open `{`/`[` frames; when a
+// `}` is seen while the top frame is `[`, we flip it to `]`. A matching
+// `]` appearing later while the top frame is `{` is flipped back to `}`.
+// The walker respects string literals (with escapes) so it never rewrites
+// characters inside a JSON string value. If no mismatch is observed,
+// the input is returned byte-for-byte unchanged.
+func repairBracketBraceMismatch(raw []byte) []byte {
+	buf := make([]byte, len(raw))
+	copy(buf, raw)
+	stack := make([]byte, 0, 16)
+	inStr := false
+	escape := false
+	changed := false
+	for i := 0; i < len(buf); i++ {
+		c := buf[i]
+		if inStr {
+			if escape {
+				escape = false
+				continue
+			}
+			if c == '\\' {
+				escape = true
+				continue
+			}
+			if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{', '[':
+			stack = append(stack, c)
+		case '}':
+			if n := len(stack); n > 0 {
+				top := stack[n-1]
+				if top == '[' {
+					// Mismatch — model emitted '}' where ']' was expected.
+					buf[i] = ']'
+					stack = stack[:n-1]
+					changed = true
+					continue
+				}
+				stack = stack[:n-1]
+			}
+		case ']':
+			if n := len(stack); n > 0 {
+				top := stack[n-1]
+				if top == '{' {
+					// Mismatch — model emitted ']' where '}' was expected.
+					buf[i] = '}'
+					stack = stack[:n-1]
+					changed = true
+					continue
+				}
+				stack = stack[:n-1]
+			}
+		}
+	}
+	if !changed {
+		return raw
+	}
+	return buf
+}
+
+// repairTruncatedTrailingBrace handles Pattern E: a payload missing
+// exactly one trailing '}'. We only append when the overall brace count
+// is off-by-one positive AND bracket count is balanced — anything more
+// is too risky to synthesize.
+func repairTruncatedTrailingBrace(raw []byte) []byte {
+	brace, bracket := countBalance(raw)
+	if brace == 1 && bracket == 0 {
+		return append(append([]byte{}, raw...), '}')
+	}
+	return raw
+}
+
+// countBalance returns (openBraces-closeBraces, openBrackets-closeBrackets),
+// ignoring characters inside JSON strings (quote handling with escapes).
+func countBalance(raw []byte) (int, int) {
+	braces, brackets := 0, 0
+	inStr := false
+	escape := false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if inStr {
+			if escape {
+				escape = false
+				continue
+			}
+			if c == '\\' {
+				escape = true
+				continue
+			}
+			if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{':
+			braces++
+		case '}':
+			braces--
+		case '[':
+			brackets++
+		case ']':
+			brackets--
+		}
+	}
+	return braces, brackets
+}
+
 // stripJSONFences removes surrounding ```json ... ``` if present.
 func stripJSONFences(s string) string {
 	s = strings.TrimSpace(s)
@@ -257,8 +545,60 @@ func stripJSONFences(s string) string {
 }
 
 type nuextractEntity struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name string        `json:"name"`
+	Type nuextractType `json:"type"`
+}
+
+// nuextractType tolerates both string ("PERSON") and array-of-string
+// (["PERSON"]) values for the "type" field. NuExtract's template declares
+// the type enum as an array, and MLX quants occasionally echo the array
+// literal back verbatim instead of selecting a single enum value. We accept
+// either and collapse arrays to their first non-empty string.
+type nuextractType string
+
+func (t *nuextractType) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		*t = ""
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*t = nuextractType(s)
+		return nil
+	}
+	if trimmed[0] == '[' {
+		var arr []string
+		if err := json.Unmarshal(data, &arr); err == nil {
+			for _, s := range arr {
+				if strings.TrimSpace(s) != "" {
+					*t = nuextractType(s)
+					return nil
+				}
+			}
+			*t = ""
+			return nil
+		}
+		// Fall through to any-slice fallback for [null, "X"] etc.
+		var anyArr []any
+		if err := json.Unmarshal(data, &anyArr); err != nil {
+			return err
+		}
+		for _, v := range anyArr {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				*t = nuextractType(s)
+				return nil
+			}
+		}
+		*t = ""
+		return nil
+	}
+	// unknown shape — leave empty, don't fail parse
+	*t = ""
+	return nil
 }
 
 type nuextractRelation struct {
@@ -272,7 +612,8 @@ func parseNuExtractEntities(content string) ([]schema.Entity, string, error) {
 		Entities []nuextractEntity `json:"entities"`
 	}
 	content = stripJSONFences(content)
-	if err := json.Unmarshal([]byte(content), &raw); err != nil {
+	repaired := repairNuExtractJSON([]byte(content))
+	if err := json.Unmarshal(repaired, &raw); err != nil {
 		return nil, "", fmt.Errorf("parse nuextract entities: %w\nraw: %s", err, truncate(content, 500))
 	}
 	return entitiesFromRaw(raw.Entities)
@@ -283,7 +624,8 @@ func parseNuExtractRelations(content string) ([]schema.Relationship, error) {
 		Relationships []nuextractRelation `json:"relationships"`
 	}
 	content = stripJSONFences(content)
-	if err := json.Unmarshal([]byte(content), &raw); err != nil {
+	repaired := repairNuExtractJSON([]byte(content))
+	if err := json.Unmarshal(repaired, &raw); err != nil {
 		return nil, fmt.Errorf("parse nuextract relations: %w\nraw: %s", err, truncate(content, 500))
 	}
 	return relationshipsFromRaw(raw.Relationships), nil
@@ -295,7 +637,8 @@ func parseNuExtractCombined(content string) ([]schema.Entity, []schema.Relations
 		Relationships []nuextractRelation `json:"relationships"`
 	}
 	content = stripJSONFences(content)
-	if err := json.Unmarshal([]byte(content), &raw); err != nil {
+	repaired := repairNuExtractJSON([]byte(content))
+	if err := json.Unmarshal(repaired, &raw); err != nil {
 		return nil, nil, "", fmt.Errorf("parse nuextract combined: %w\nraw: %s", err, truncate(content, 500))
 	}
 	entities, entType, err := entitiesFromRaw(raw.Entities)
@@ -313,9 +656,10 @@ func entitiesFromRaw(raw []nuextractEntity) ([]schema.Entity, string, error) {
 		if name == "" {
 			continue
 		}
-		entities = append(entities, schema.Entity{Name: name, Role: e.Type})
-		if e.Type != "" {
-			typeCounts[e.Type]++
+		role := string(e.Type)
+		entities = append(entities, schema.Entity{Name: name, Role: role})
+		if role != "" {
+			typeCounts[role]++
 		}
 	}
 	bestType := ""
