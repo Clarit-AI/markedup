@@ -69,6 +69,10 @@ func newSetupCmd() *cobra.Command {
 }
 
 func runSetup(ctx context.Context, d *setupDeps) error {
+	// setup writes credentials and benefits from migrating legacy entries
+	// before recording new ones (issue #153: lazy, opt-in hydration).
+	_ = config.HydrateKeys(appConfig)
+
 	w := d.Stdout
 	scanner := bufio.NewScanner(d.Stdin)
 

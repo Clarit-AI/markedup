@@ -16,13 +16,14 @@ const configFileName = ".markedup.yaml"
 // deemed acceptable — MigrateLegacyKeys is itself idempotent and safe to
 // re-run, so the worst case is a duplicated read/no-op cycle, never data loss.
 //
-// Hydration is intentionally NOT gated by Once: each Load() call may receive
-// a different cfg with different endpoints, so the keyring lookup must run
-// every time.
+// Hydration is intentionally NOT gated by Once: each HydrateKeys call may
+// receive a different cfg with different endpoints, so the keyring lookup
+// must run every time it is explicitly invoked by a subcommand that needs
+// API keys.
 var migrateOnce sync.Once
 
-// resetMigrateOnceForTest re-arms migrateOnce so each test's Load() invocation
-// re-runs migration against a freshly-stubbed keyring backend.
+// resetMigrateOnceForTest re-arms migrateOnce so each test's HydrateKeys
+// invocation re-runs migration against a freshly-stubbed keyring backend.
 func resetMigrateOnceForTest() {
 	migrateOnce = sync.Once{}
 }
@@ -66,20 +67,39 @@ func Load(kbDir string) (*Config, error) {
 	cfg := mergeConfigs(global, local)
 	applyEnvOverrides(cfg)
 
+	// NOTE: Load() intentionally does NOT touch the OS keyring (issue #153).
+	// Read-only subcommands (check, validate, version, …) must never trigger
+	// a macOS keychain ACL prompt. Subcommands that actually need API keys
+	// must call config.HydrateKeys(cfg) explicitly after Load().
+	return cfg, nil
+}
+
+// HydrateKeys runs the one-time-per-process legacy-key migration and then
+// fills any empty APIKey fields in cfg from the OS keyring, looked up by
+// endpoint. It is safe to call multiple times in one process: migration is
+// gated by sync.Once so it runs at most once, while hydration runs every
+// call (different cfgs may have different endpoints).
+//
+// Subcommands that make outbound API calls (enrich, serve, embed, tui) or
+// that store credentials (setup) must call this after config.Load(). Local-
+// only subcommands (check, init, search, explore, show, export) must not.
+func HydrateKeys(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+
 	// One-time-per-process migration of legacy per-service keyring entries
 	// to the endpoint-keyed format (issue #117). MigrateLegacyKeys is itself
 	// idempotent; the sync.Once just avoids redundant keyring reads when a
-	// long-lived process calls Load() multiple times.
+	// long-lived process calls HydrateKeys multiple times.
 	migrateOnce.Do(func() {
 		MigrateLegacyKeys(cfg)
 	})
 
 	// Hydrate any APIKey fields still empty (env vars / YAML did not provide
 	// one) from the keyring, looked up by endpoint. Same endpoint = one read.
-	// Runs every Load — different kbDirs may yield different endpoints.
 	hydrateKeysFromKeyring(cfg)
-
-	return cfg, nil
+	return nil
 }
 
 // Save writes cfg to path as YAML. Fields tagged yaml:"-" (APIKey) are

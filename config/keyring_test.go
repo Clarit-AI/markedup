@@ -407,7 +407,7 @@ func TestHydrateKeysFromKeyring_OneReadPerEndpoint(t *testing.T) {
 	assert.Empty(t, cfg.Triplex.APIKey)
 }
 
-func TestLoad_MigrationRunsOncePerProcess(t *testing.T) {
+func TestHydrateKeys_MigrationRunsOncePerProcess(t *testing.T) {
 	// Reset the package-level Once so this test can observe a fresh first run.
 	resetMigrateOnceForTest()
 
@@ -422,19 +422,21 @@ embed:
 `)
 	t.Setenv("HOME", t.TempDir())
 
-	// First Load: migration runs, legacy entry is consumed.
-	_, err := Load(kbDir)
+	// First Load + HydrateKeys: migration runs, legacy entry is consumed.
+	cfg, err := Load(kbDir)
 	require.NoError(t, err)
+	require.NoError(t, HydrateKeys(cfg))
 	_, err = ring.Get("embed-api-key")
-	assert.ErrorIs(t, err, keyring.ErrKeyNotFound, "first Load should have migrated the legacy entry")
+	assert.ErrorIs(t, err, keyring.ErrKeyNotFound, "first HydrateKeys should have migrated the legacy entry")
 
-	// Re-introduce the legacy entry. A second Load in the same process must
-	// NOT re-run migration (sync.Once gating), so the entry should remain.
+	// Re-introduce the legacy entry. A second HydrateKeys in the same process
+	// must NOT re-run migration (sync.Once gating), so the entry should remain.
 	require.NoError(t, ring.Set(keyring.Item{Key: "embed-api-key", Data: []byte("sk-embed-2")}))
-	_, err = Load(kbDir)
+	cfg, err = Load(kbDir)
 	require.NoError(t, err)
+	require.NoError(t, HydrateKeys(cfg))
 	item, err := ring.Get("embed-api-key")
-	require.NoError(t, err, "second Load must skip migration (sync.Once)")
+	require.NoError(t, err, "second HydrateKeys must skip migration (sync.Once)")
 	assert.Equal(t, "sk-embed-2", string(item.Data))
 }
 
@@ -459,4 +461,73 @@ func TestHydrateKeysFromKeyring_DoesNotClobberExplicit(t *testing.T) {
 
 	// LLM triggered the only read; Embed was skipped because APIKey was set.
 	assert.Equal(t, 1, ring.getCounts[keyName], "no read should occur for explicitly-populated services")
+}
+
+// TestLoad_DoesNotOpenKeyring asserts that config.Load() never reaches the
+// keyring backend. Subcommands that don't need API keys (check, validate,
+// version, …) must not trigger a macOS keychain ACL prompt (issue #153).
+func TestLoad_DoesNotOpenKeyring(t *testing.T) {
+	// Wrap the package-level opener with a counter so we can assert the ring
+	// is never opened during Load().
+	var openCount int
+	prev := openRingFn
+	openRingFn = func() (keyring.Keyring, error) {
+		openCount++
+		return newFakeRing(), nil
+	}
+	t.Cleanup(func() { openRingFn = prev })
+
+	kbDir := t.TempDir()
+	writeYAML(t, filepath.Join(kbDir, ".markedup.yaml"), `
+embed:
+  endpoint: https://api.openai.com/v1
+llm:
+  endpoint: https://api.openai.com/v1
+`)
+	t.Setenv("HOME", t.TempDir())
+
+	_, err := Load(kbDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, openCount, "Load() must not open the OS keyring")
+}
+
+// TestHydrateKeys_OpensKeyringAndMigrates verifies that the moved behavior
+// — legacy migration + endpoint-keyed hydration — still works when callers
+// explicitly invoke HydrateKeys after Load.
+func TestHydrateKeys_OpensKeyringAndMigrates(t *testing.T) {
+	resetMigrateOnceForTest()
+
+	endpoint := "https://api.openai.com/v1"
+	ring := newFakeRing()
+	// A legacy entry that should be migrated to the endpoint-keyed name.
+	require.NoError(t, ring.Set(keyring.Item{Key: "embed-api-key", Data: []byte("sk-legacy")}))
+	withFakeRing(t, ring)
+
+	kbDir := t.TempDir()
+	writeYAML(t, filepath.Join(kbDir, ".markedup.yaml"), `
+embed:
+  endpoint: https://api.openai.com/v1
+`)
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := Load(kbDir)
+	require.NoError(t, err)
+	// Load() did not touch the keyring, so APIKey is still empty.
+	assert.Empty(t, cfg.Embed.APIKey, "Load() must not have hydrated the key")
+
+	require.NoError(t, HydrateKeys(cfg))
+
+	// Migration consumed the legacy entry.
+	_, err = ring.Get("embed-api-key")
+	assert.ErrorIs(t, err, keyring.ErrKeyNotFound, "legacy entry should be migrated away")
+
+	// Hydration populated APIKey from the new endpoint-keyed entry.
+	assert.Equal(t, "sk-legacy", cfg.Embed.APIKey, "HydrateKeys should have populated APIKey")
+
+	// Endpoint-keyed entry exists with the migrated value.
+	keyName := KeyNameForEndpoint(endpoint)
+	item, err := ring.Get(keyName)
+	require.NoError(t, err)
+	assert.Equal(t, "sk-legacy", string(item.Data))
 }
