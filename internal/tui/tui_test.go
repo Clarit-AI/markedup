@@ -65,12 +65,22 @@ func writeTestFile(dir, name, content string) error {
 	return os.WriteFile(filepath.Join(dir, name), []byte(content), 0644)
 }
 
+func skipSplashForTest(t *testing.T, m Model) Model {
+	t.Helper()
+	m.splash = m.splash.Skip()
+	advanced, _ := m.advanceSplash()
+	return advanced.(Model)
+}
+
 func TestNewModel_EmptyIndex(t *testing.T) {
 	idx := buildTestIndex(t)
 	m := NewModel(idx, ".", nil)
 
 	assert.True(t, m.empty)
-	// Empty index should show onboarding screen, not search.
+	assert.Equal(t, viewSplash, m.current)
+	assert.Equal(t, viewOnboarding, m.splashNext)
+
+	m = skipSplashForTest(t, m)
 	assert.Equal(t, viewOnboarding, m.current)
 
 	v := m.View()
@@ -88,7 +98,10 @@ func TestNewModel_WithPages(t *testing.T) {
 
 	m := NewModel(idx, ".", nil)
 	assert.False(t, m.empty)
-	// With pages, should start at home screen.
+	assert.Equal(t, viewSplash, m.current)
+	assert.Equal(t, viewHome, m.splashNext)
+
+	m = skipSplashForTest(t, m)
 	assert.Equal(t, viewHome, m.current)
 
 	v := m.View()
@@ -106,8 +119,49 @@ func TestModel_WindowResize(t *testing.T) {
 	rm := resized.(Model)
 	assert.Equal(t, 120, rm.width)
 	assert.Equal(t, 40, rm.height)
+	assert.Equal(t, 120, rm.splash.width)
+	assert.Equal(t, 40, rm.splash.height)
 	assert.Equal(t, 120, rm.search.width)
 	assert.Equal(t, 40, rm.search.height)
+}
+
+func TestModel_SplashTick_AdvancesToHome(t *testing.T) {
+	idx := buildTestIndex(t,
+		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
+	)
+	m := NewModel(idx, ".", nil)
+
+	for i := 0; i < splashMaxFrames; i++ {
+		updated, _ := m.Update(splashTickMsg{})
+		m = updated.(Model)
+	}
+
+	assert.Equal(t, viewHome, m.current)
+}
+
+func TestModel_SplashTick_AdvancesToOnboarding(t *testing.T) {
+	idx := buildTestIndex(t)
+	m := NewModel(idx, ".", nil)
+
+	for i := 0; i < splashMaxFrames; i++ {
+		updated, _ := m.Update(splashTickMsg{})
+		m = updated.(Model)
+	}
+
+	assert.Equal(t, viewOnboarding, m.current)
+}
+
+func TestModel_SplashKeySkipsToDestination(t *testing.T) {
+	idx := buildTestIndex(t,
+		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
+	)
+	m := NewModel(idx, ".", nil)
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(Model)
+
+	assert.Nil(t, cmd)
+	assert.Equal(t, viewHome, m.current)
 }
 
 func TestModel_QuitOnCtrlC(t *testing.T) {
@@ -129,6 +183,7 @@ func TestModel_QuitOnQ_EmptyInput(t *testing.T) {
 		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
 	)
 	m := NewModel(idx, ".", nil)
+	m = skipSplashForTest(t, m)
 
 	// q with empty input should quit.
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
@@ -302,7 +357,7 @@ func TestModel_ViewTransitions(t *testing.T) {
 	)
 
 	m := NewModel(idx, ".", nil)
-	// With pages, starts at home screen.
+	m = skipSplashForTest(t, m)
 	assert.Equal(t, viewHome, m.current)
 
 	// Enter on Search menu item (index 0) to go to search view.
@@ -486,6 +541,7 @@ func TestModel_Settings_OpensWizard(t *testing.T) {
 		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
 	)
 	m := NewModel(idx, ".", nil)
+	m = skipSplashForTest(t, m)
 	assert.Equal(t, viewHome, m.current)
 
 	// Navigate to Settings (index 4).
@@ -506,6 +562,7 @@ func TestModel_Settings_WizardCancel_ReturnsHome(t *testing.T) {
 		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
 	)
 	m := NewModel(idx, ".", nil)
+	m = skipSplashForTest(t, m)
 
 	// Open settings.
 	m.home.cursor = homeMenuSettings
@@ -524,6 +581,7 @@ func TestModel_Settings_GlobalQDoesNotQuitInWizard(t *testing.T) {
 		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
 	)
 	m := NewModel(idx, ".", nil)
+	m = skipSplashForTest(t, m)
 
 	// Open settings.
 	m.home.cursor = homeMenuSettings
@@ -567,6 +625,7 @@ func TestModel_ExploreMode_Header(t *testing.T) {
 		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
 	)
 	m := NewModel(idx, ".", nil)
+	m = skipSplashForTest(t, m)
 
 	// Navigate to Explore from home.
 	m.home.cursor = homeMenuExplore
@@ -585,6 +644,7 @@ func TestModel_StatusBar_AppendedToView(t *testing.T) {
 		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
 	)
 	m := NewModel(idx, ".", nil)
+	m = skipSplashForTest(t, m)
 	m.status = statusModel{state: taskDone, taskName: "Enrich"}
 
 	v := m.View()

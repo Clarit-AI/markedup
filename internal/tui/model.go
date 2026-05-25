@@ -18,7 +18,8 @@ import (
 type view int
 
 const (
-	viewHome view = iota
+	viewSplash view = iota
+	viewHome
 	viewSearch
 	viewDocument
 	viewExplore
@@ -47,6 +48,8 @@ type Model struct {
 	kbDir       string
 	cfg         *config.Config
 	current     view
+	splashNext  view
+	splash      splashModel
 	home        homeModel
 	search      searchModel
 	doc         docModel
@@ -73,7 +76,9 @@ func NewModel(idx *index.KnowledgeIndex, kbDir string, cfg *config.Config) Model
 		idx:        idx,
 		kbDir:      kbDir,
 		cfg:        cfg,
-		current:    initial,
+		current:    viewSplash,
+		splashNext: initial,
+		splash:     newSplashModel(),
 		home:       newHomeModel(),
 		search:     newSearchModel(idx),
 		onboarding: newOnboardingModel(),
@@ -83,6 +88,9 @@ func NewModel(idx *index.KnowledgeIndex, kbDir string, cfg *config.Config) Model
 
 // Init implements tea.Model.
 func (m Model) Init() tea.Cmd {
+	if m.current == viewSplash {
+		return m.splash.Init()
+	}
 	if m.current == viewOnboarding {
 		return m.onboarding.Init()
 	}
@@ -98,6 +106,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.splash.SetSize(msg.Width, msg.Height)
 		m.home.width = msg.Width
 		m.home.height = msg.Height
 		m.search.width = msg.Width
@@ -117,6 +126,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Propagate resize to the wizard if active.
 		if m.current == viewSetup {
 			m.wizard.SetSize(msg.Width, msg.Height)
+		}
+		return m, nil
+
+	case splashTickMsg:
+		if m.current == viewSplash {
+			return m.updateSplash(msg)
 		}
 		return m, nil
 
@@ -176,6 +191,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, dismissTick()
 
 	case tea.KeyMsg:
+		if m.current == viewSplash {
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			m.splash = m.splash.Skip()
+			return m.advanceSplash()
+		}
+
 		// When the setup wizard is active, only intercept ctrl+c at the
 		// top level (the embedded wizard handles its own ctrl+c/esc).
 		if m.current == viewSetup {
@@ -220,6 +243,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Delegate to current view.
 	switch m.current {
+	case viewSplash:
+		return m.updateSplash(msg)
 	case viewHome:
 		return m.updateHome(msg)
 	case viewOnboarding:
@@ -235,6 +260,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m Model) updateSplash(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.splash, cmd = m.splash.Update(msg)
+	if m.splash.Done() {
+		return m.advanceSplash()
+	}
+	return m, cmd
+}
+
+func (m Model) advanceSplash() (tea.Model, tea.Cmd) {
+	m.current = m.splashNext
+	switch m.current {
+	case viewOnboarding:
+		return m, m.onboarding.Init()
+	case viewHome:
+		return m, m.home.Init()
+	default:
+		return m, nil
+	}
 }
 
 func (m Model) updateHome(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -432,6 +478,8 @@ func (m *Model) navigateToNode(page *schema.Page) {
 func (m Model) View() string {
 	var content string
 	switch m.current {
+	case viewSplash:
+		content = m.splash.View()
 	case viewHome:
 		content = m.home.View()
 	case viewOnboarding:
