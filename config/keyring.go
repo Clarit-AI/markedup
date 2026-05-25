@@ -5,14 +5,20 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"log"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/99designs/keyring"
 )
 
 const serviceName = "markedup"
+
+const disableKeyringEnv = "MARKEDUP_DISABLE_KEYRING"
+
+var errKeyringDisabled = errors.New("markedup keyring disabled")
 
 // legacyServiceKeyNames lists the historical per-service keyring entries that
 // predate endpoint-keyed storage. They are migrated and removed by
@@ -36,7 +42,19 @@ var openRingFn = func() (keyring.Keyring, error) {
 
 // openRing opens the OS keyring for the markedup service.
 func openRing() (keyring.Keyring, error) {
+	if keyringDisabled() {
+		return nil, errKeyringDisabled
+	}
 	return openRingFn()
+}
+
+func keyringDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(disableKeyringEnv))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // StoreKey saves a named key to the OS keychain under the "markedup" service.

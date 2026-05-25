@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -10,6 +11,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMain(m *testing.M) {
+	_ = os.Setenv("MARKEDUP_DISABLE_KEYRING", "1")
+	os.Exit(m.Run())
+}
 
 // fakeDeps builds a setupDeps with sensible defaults for testing.
 // stdin is the newline-separated user input to feed.
@@ -64,12 +70,12 @@ func TestSetup_CloudProvider_SavesConfig(t *testing.T) {
 	// User picks OpenRouter (1) for embed with model "text-embedding-3",
 	// skips LLM and reranker, confirms save.
 	input := strings.Join([]string{
-		"1",                    // Embed: OpenRouter
-		"text-embedding-3",    // model name
-		"sk-test-embed-key",   // API key
-		"5",                    // LLM: Skip
-		"5",                    // Rerank: Skip
-		"y",                    // Save
+		"1",                 // Embed: OpenRouter
+		"text-embedding-3",  // model name
+		"sk-test-embed-key", // API key
+		"5",                 // LLM: Skip
+		"5",                 // Rerank: Skip
+		"y",                 // Save
 	}, "\n") + "\n"
 
 	var savedCfg *config.Config
@@ -107,11 +113,11 @@ func TestSetup_DetectedLocal(t *testing.T) {
 	// Simulate a detected Ollama instance. User picks it for embed,
 	// selects model by number, skips rest, saves.
 	input := strings.Join([]string{
-		"1",    // Embed: Ollama (local)
-		"1",    // model by number: nomic-embed-text
-		"6",    // LLM: Skip (1 detected + 4 cloud + 1 skip = 6)
-		"6",    // Rerank: Skip
-		"y",    // Save
+		"1", // Embed: Ollama (local)
+		"1", // model by number: nomic-embed-text
+		"6", // LLM: Skip (1 detected + 4 cloud + 1 skip = 6)
+		"6", // Rerank: Skip
+		"y", // Save
 	}, "\n") + "\n"
 
 	var savedCfg *config.Config
@@ -149,13 +155,13 @@ func TestSetup_CustomEndpoint(t *testing.T) {
 	// User picks Custom for embed, provides endpoint, model, and key.
 	// Custom is option 4 (no detected servers).
 	input := strings.Join([]string{
-		"4",                        // Embed: Custom
-		"http://my-server:9000",    // endpoint
-		"my-embed-model",           // model
-		"my-secret-key",            // API key
-		"5",                        // LLM: Skip
-		"5",                        // Rerank: Skip
-		"y",                        // Save
+		"4",                     // Embed: Custom
+		"http://my-server:9000", // endpoint
+		"my-embed-model",        // model
+		"my-secret-key",         // API key
+		"5",                     // LLM: Skip
+		"5",                     // Rerank: Skip
+		"y",                     // Save
 	}, "\n") + "\n"
 
 	var savedCfg *config.Config
@@ -177,12 +183,12 @@ func TestSetup_CustomEndpoint(t *testing.T) {
 func TestSetup_KeyringUnavailable(t *testing.T) {
 	// When keyring is not available, should print env var instructions.
 	input := strings.Join([]string{
-		"1",                   // Embed: OpenRouter
+		"1", // Embed: OpenRouter
 		"text-embedding-3",
 		"sk-key",
-		"5",                   // LLM: Skip
-		"5",                   // Rerank: Skip
-		"y",                   // Save
+		"5", // LLM: Skip
+		"5", // Rerank: Skip
+		"y", // Save
 	}, "\n") + "\n"
 
 	d, out := fakeDeps(input)
@@ -211,12 +217,12 @@ func TestSetup_CommandRegistered(t *testing.T) {
 func TestSetup_InvalidInput_Reprompts(t *testing.T) {
 	// Send invalid input first, then valid.
 	input := strings.Join([]string{
-		"abc",  // invalid
-		"99",   // out of range
-		"5",    // valid: Skip
-		"5",    // LLM: Skip
-		"5",    // Rerank: Skip
-		"n",    // Don't save
+		"abc", // invalid
+		"99",  // out of range
+		"5",   // valid: Skip
+		"5",   // LLM: Skip
+		"5",   // Rerank: Skip
+		"n",   // Don't save
 	}, "\n") + "\n"
 
 	d, out := fakeDeps(input)
