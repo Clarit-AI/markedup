@@ -100,9 +100,22 @@ func TestOverwriteKey(t *testing.T) {
 }
 
 func TestKeyringAvailable(t *testing.T) {
-	// KeyringAvailable uses the default OS keyring backend.
-	// We just verify it returns a boolean without panicking.
-	_ = KeyringAvailable()
+	ring := newFakeRing()
+	withFakeRing(t, ring)
+	assert.True(t, KeyringAvailable())
+}
+
+func TestKeyringDisabledByEnv(t *testing.T) {
+	ring := newFakeRing()
+	withFakeRing(t, ring)
+	t.Setenv(disableKeyringEnv, "1")
+
+	assert.False(t, KeyringAvailable())
+
+	_, err := GetKey("anything")
+	assert.ErrorIs(t, err, errKeyringDisabled)
+	assert.ErrorIs(t, StoreKey("anything", "secret"), errKeyringDisabled)
+	assert.ErrorIs(t, DeleteKey("anything"), errKeyringDisabled)
 }
 
 // TestPublicAPI_WithFileBackend exercises the public StoreKey/GetKey/DeleteKey
