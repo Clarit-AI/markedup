@@ -11,6 +11,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var (
+	hydrateKeys      = config.HydrateKeys
+	runSetupWizard   = setup.Run
+	runStartupSplash = tui.RunStartupSplash
+	runTUIProgram    = tui.Run
+)
+
 func newTUICmd() *cobra.Command {
 	var dir string
 
@@ -31,7 +38,15 @@ func newTUICmd() *cobra.Command {
 func runTUI(dir string) error {
 	// First-run detection: launch setup wizard if no config exists.
 	if !config.Exists(dir) {
-		cfg, err := setup.Run()
+		cancelled, err := runStartupSplash()
+		if err != nil {
+			return err
+		}
+		if cancelled {
+			return nil
+		}
+
+		cfg, err := runSetupWizard()
 		if err != nil {
 			return err
 		}
@@ -45,12 +60,12 @@ func runTUI(dir string) error {
 
 	// tui exposes search/embed/llm interactions — populate API keys from the
 	// keyring now (issue #153: lazy, opt-in hydration).
-	_ = config.HydrateKeys(appConfig)
+	_ = hydrateKeys(appConfig)
 
 	result, err := index.Load(context.Background(), dir, index.WithIgnoreErrors(true))
 	if err != nil {
 		return fmt.Errorf("failed to load %s: %w", dir, err)
 	}
 
-	return tui.Run(result.Index, dir, appConfig)
+	return runTUIProgram(result.Index, dir, appConfig)
 }
