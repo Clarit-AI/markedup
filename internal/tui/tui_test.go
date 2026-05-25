@@ -164,6 +164,34 @@ func TestModel_SplashKeySkipsToDestination(t *testing.T) {
 	assert.Equal(t, viewHome, m.current)
 }
 
+func TestStartupSplashModel_CompletesWithQuit(t *testing.T) {
+	m := newStartupSplashModel()
+	var cmd tea.Cmd
+
+	for i := 0; i < splashMaxFrames; i++ {
+		updated, nextCmd := m.Update(splashTickMsg{})
+		m = updated.(startupSplashModel)
+		cmd = nextCmd
+	}
+
+	require.NotNil(t, cmd)
+	_, isQuit := cmd().(tea.QuitMsg)
+	assert.True(t, isQuit)
+	assert.False(t, m.cancelled)
+}
+
+func TestStartupSplashModel_CtrlCCancels(t *testing.T) {
+	m := newStartupSplashModel()
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m = updated.(startupSplashModel)
+
+	require.NotNil(t, cmd)
+	_, isQuit := cmd().(tea.QuitMsg)
+	assert.True(t, isQuit)
+	assert.True(t, m.cancelled)
+}
+
 func TestModel_QuitOnCtrlC(t *testing.T) {
 	idx := buildTestIndex(t,
 		&schema.Page{Frontmatter: schema.GraphFrontmatter{ID: "test-1", Title: "Test Page", Confidence: 0.9}},
