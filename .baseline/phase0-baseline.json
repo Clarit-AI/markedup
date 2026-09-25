@@ -1,0 +1,51 @@
+{
+  "captured_at": "2026-09-25T17:16:11Z",
+  "commit": "41e4b0d",
+  "flip_rate_n": 200,
+  "flip_rate_outcomes": {
+    "concept": 26,
+    "event": 21,
+    "location": 23,
+    "organization": 20,
+    "person": 85,
+    "tool": 25
+  },
+  "flip_rate_distinct": 6,
+  "flip_rate_min_count": 20,
+  "flip_rate_max_count": 85,
+  "merge_gate_inputs": [
+    "LOCATION",
+    "TECHNOLOGY",
+    "DATE",
+    "OTHER",
+    "PROJECT"
+  ],
+  "merge_gate_result_by_input": {
+    "DATE": "",
+    "LOCATION": "",
+    "OTHER": "",
+    "PROJECT": "project",
+    "TECHNOLOGY": "",
+    "__with_existing_document__": "document"
+  },
+  "merge_gate_dropped_count": 4,
+  "merge_gate_dropped_inputs": [
+    "LOCATION",
+    "TECHNOLOGY",
+    "DATE",
+    "OTHER"
+  ],
+  "b1_before_state": {
+    "source": "2026-09-19 audit probe (live, surface=plugin MCP)",
+    "captured_at": "2026-09-23T00:00:00Z",
+    "pages": 2,
+    "relationships": 0,
+    "notes": "Probe returned {\"pages\":2,\"relationships\":0}; one page had id=\"\". B1 = Tier-2 NER writes SemanticRelationships that nothing reads; B3 = empty-ID collision in index.Load. Live probe evidence file is no longer at docs/audits/; number recorded here from session-handoff artifact.",
+    "raw_observation": {
+      "corpus_collision_key": "",
+      "empty_id_page_count": 1,
+      "pages": 2,
+      "relationships": 0
+    }
+  }
+}
