@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"os"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -9,6 +10,11 @@ import (
 
 	"github.com/Clarit-AI/markedup/config"
 )
+
+func TestMain(m *testing.M) {
+	_ = os.Setenv("MARKEDUP_DISABLE_KEYRING", "1")
+	os.Exit(m.Run())
+}
 
 func TestNewWizardModel_InitialState(t *testing.T) {
 	m := NewWizardModel()

@@ -1,9 +1,15 @@
 package markedup_test
 
 import (
+	"os"
 	"os/exec"
 	"testing"
 )
+
+func TestMain(m *testing.M) {
+	_ = os.Setenv("MARKEDUP_DISABLE_KEYRING", "1")
+	os.Exit(m.Run())
+}
 
 func TestBinaryBuilds(t *testing.T) {
 	cmd := exec.Command("go", "build", "-o", t.TempDir()+"/markedup", "./cmd/markedup")
