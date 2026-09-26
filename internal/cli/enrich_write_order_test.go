@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -224,6 +225,69 @@ func TestRunEnrich_FailedFileIsRetriedOnNextRun(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "id: retry",
 		"the retried-and-failed file must keep its Tier 1 frontmatter")
+}
+
+// A persistTier1 write failure must be SURFACED, not swallowed.
+//
+// persistTier1 is the run's last chance to leave a failed-Tier-2 file better
+// than it found it. It used to assign the write error to `_`, so a full disk
+// or a read-only directory produced a "1 failed." line whose reason was the
+// Tier-2 parse error — with no hint that the Tier-1 write the run implicitly
+// promised never happened. The user could not tell whether Tier 1 landed.
+//
+// This forces exactly that failure — a read-only directory makes
+// WriteFrontmatterFile's temp-file creation fail — and pins three things:
+// the Warning line is printed, the file really is untouched (the warning must
+// not lie in the other direction either), and the run still reports the
+// fallback failure.
+func TestRunEnrich_PersistTier1WarnsWhenWriteFails(t *testing.T) {
+	// Directory permission bits are the failure lever; they do not map
+	// cleanly on Windows, and root ignores them on Unix.
+	if runtime.GOOS == "windows" {
+		t.Skip("directory write permission bits are not enforced the same way on windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory write permission bits")
+	}
+
+	dir := t.TempDir()
+	original := "# RO Doc\n\nBody with a #tag and [[wikilink]].\n"
+	filePath := filepath.Join(dir, "ro.md")
+	require.NoError(t, os.WriteFile(filePath, []byte(original), 0644))
+	require.NoError(t, os.Chmod(dir, 0555))
+	// Registered after TempDir's own cleanup, so LIFO restores writability
+	// before TempDir tries to remove the directory.
+	t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+
+	srv := writeOrderTestEndpoint(t)
+
+	cmd := newEnrichCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{dir, "--model", "test-model", "--format", "nuextract",
+		"--endpoint", srv.URL, "--timeout", "10s"})
+	resetEnrichFlags()
+	enrichModel = "test-model"
+	enrichFormat = "nuextract"
+	enrichEndpoint = srv.URL
+	enrichTimeout = 10 * time.Second
+
+	require.NoError(t, cmd.Execute())
+
+	// The warning must be printed — this is the assertion that fails if a
+	// refactor ever goes back to swallowing the error.
+	assert.Contains(t, buf.String(), "Warning: could not persist Tier 1 frontmatter for ro.md",
+		"a failed Tier-1 write must be surfaced, not silently swallowed")
+
+	// The warning must correspond to reality: nothing landed.
+	data, err := os.ReadFile(filePath)
+	require.NoError(t, err)
+	assert.Equal(t, original, string(data),
+		"the file must be untouched when the Tier-1 write failed")
+
+	// And the fallback failure is still reported.
+	assert.Contains(t, buf.String(), "1 files left unrecovered")
+	assert.Contains(t, buf.String(), "1 failed.")
 }
 
 // Summary generation must be SKIPPED for queued files, not merely discarded.
