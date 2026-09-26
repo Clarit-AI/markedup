@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -14,7 +15,22 @@ import (
 
 func TestMain(m *testing.M) {
 	_ = os.Setenv("MARKEDUP_DISABLE_KEYRING", "1")
-	os.Exit(m.Run())
+
+	// Route handoff retry logs to a scratch directory for the whole test
+	// binary. runEnrich's non-interactive path writes a retry log for every
+	// Tier-2 failure it hands off, and several tests here exercise exactly
+	// that path — without this they litter the developer's real
+	// ~/.markedup/logs on every `go test ./internal/cli/` run (#145 review
+	// finding: the count was observed growing by one file per run).
+	dir, err := os.MkdirTemp("", "markedup-cli-handoff-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "test setup: %v\n", err)
+		os.Exit(1)
+	}
+	handoffLogDir = dir
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
 }
 
 // fakeDeps builds a setupDeps with sensible defaults for testing.

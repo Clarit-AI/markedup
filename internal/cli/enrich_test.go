@@ -451,3 +451,26 @@ func TestRunEnrich_EndpointMatchesNuExtract_UsesNuExtractCredentials(t *testing.
 	assert.Equal(t, "numind/NuExtract-2.0-8B", enrichModel, "should use NuExtract model")
 	assert.Equal(t, "nuextract-secret", enrichAPIKey, "should use NuExtract API key, not Triplex")
 }
+
+// writeHandoffArtifacts must honor handoffLogDir. TestMain redirects the
+// whole test binary's retry logs to a scratch dir so handoff-reaching tests
+// never touch the real ~/.markedup/logs; this pins the seam itself, so a
+// refactor that drops the override fails here instead of silently resuming
+// the pollution.
+func TestWriteHandoffArtifactsHonorsLogDirOverride(t *testing.T) {
+	dir := t.TempDir()
+	orig := handoffLogDir
+	defer func() { handoffLogDir = orig }()
+	handoffLogDir = dir
+
+	paths, _, err := writeHandoffArtifacts([]enrich.HandoffJob{{
+		Path:    filepath.Join(dir, "doc.md"),
+		RelPath: "doc.md",
+		Body:    "# Doc\n\nBody.\n",
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, paths.LogPath, dir,
+		"retry log must be written inside the override dir, not the real home")
+	_, statErr := os.Stat(paths.LogPath)
+	require.NoError(t, statErr, "retry log must exist at the returned path")
+}

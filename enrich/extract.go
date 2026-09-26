@@ -103,7 +103,9 @@ func extractHashtags(body string) []string {
 
 // extractWikilinks detects [[target]] links and returns relationships.
 func extractWikilinks(body string) []schema.Relationship {
-	matches := wikilinkRe.FindAllStringSubmatch(body, -1)
+	// Skip code fences and inline code.
+	cleanBody := stripCode(body)
+	matches := wikilinkRe.FindAllStringSubmatch(cleanBody, -1)
 	if matches == nil {
 		return nil
 	}
@@ -176,6 +178,46 @@ func stripCodeFences(body string) string {
 		if !inFence {
 			result.WriteString(line)
 			result.WriteByte('\n')
+		}
+	}
+	return result.String()
+}
+
+// stripCode removes content inside fenced code blocks (``` ... ```) and
+// inline code spans (`...`).
+//
+// Fences are handled first and unconditionally, since a fence is unambiguous.
+// Inline spans are then removed by dropping the text between paired backticks.
+//
+// The unpaired case is the one that matters. A document with an odd number of
+// backticks — a typo, an unbalanced delimiter — used to cause everything after
+// the stray backtick to be discarded, silently deleting real wikilinks,
+// hashtags and URLs from the rest of the file. Losing a link to a code span is
+// the intended trade; losing the document is not. Per CommonMark an unmatched
+// backtick is literal text, so the trailing segment is kept verbatim.
+func stripCode(body string) string {
+	noFences := stripCodeFences(body)
+
+	parts := strings.Split(noFences, "`")
+	if len(parts) <= 1 {
+		return noFences
+	}
+
+	// An odd number of backticks leaves the final segment unterminated.
+	unpairedTail := (len(parts)-1)%2 == 1
+
+	var result strings.Builder
+	for i, part := range parts {
+		switch {
+		case i%2 == 0:
+			// Outside any span — always content.
+			result.WriteString(part)
+		case i == len(parts)-1 && unpairedTail:
+			// The opening backtick was never closed. Per CommonMark it is
+			// literal text, so the remainder is content too.
+			result.WriteString(part)
+		default:
+			// Between a matched pair — this is code.
 		}
 	}
 	return result.String()
