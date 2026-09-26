@@ -162,6 +162,70 @@ func TestRunEnrich_QueuedFileLeavesSummaryEmptySoNextRunRetries(t *testing.T) {
 		"a queued file must not be persisted with a summary, or it looks Tier-2-complete and is never retried")
 }
 
+// The behavioral half of "the next run retries": a file whose Tier 2 failed
+// must be REPROCESSED by the next run, not skipped as already complete.
+//
+// The empty-summary test above pins the mechanism (persistTier1 writes
+// preTier2, so the persisted file carries no summary and tier2Complete —
+// (Summary != "") — is false). This test runs the command a second time and
+// asserts the consequence end to end. Against the pre-repair code the file
+// was persisted WITH its summary, the next run then saw it as already
+// complete, and the failed Tier 2 was never retried: issue #145's hazard
+// reached by an ordinary run, no crash required. The summary skip is what
+// keeps this retry loop alive, so this test guards it behaviorally.
+//
+// Deliberately does NOT re-assert the persisted summary here: that is the
+// empty-summary test's job, and keeping the two apart means a "persisted with
+// summary" regression trips the retry assertion below, not a duplicate.
+func TestRunEnrich_FailedFileIsRetriedOnNextRun(t *testing.T) {
+	dir := t.TempDir()
+	// Always unparseable: both runs fail Tier 2 the same way, so the only
+	// variable across the two runs is whether the file is processed at all.
+	srv := writeOrderTestEndpoint(t)
+
+	filePath := filepath.Join(dir, "retry.md")
+	require.NoError(t, os.WriteFile(filePath, []byte("# Retry Doc\n\nBody with a #tag.\n"), 0644))
+
+	run := func() string {
+		cmd := newEnrichCmd()
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetArgs([]string{dir, "--model", "test-model", "--format", "nuextract",
+			"--endpoint", srv.URL, "--timeout", "10s"})
+		resetEnrichFlags()
+		enrichModel = "test-model"
+		enrichFormat = "nuextract"
+		enrichEndpoint = srv.URL
+		enrichTimeout = 10 * time.Second
+		require.NoError(t, cmd.Execute())
+		return buf.String()
+	}
+
+	// First run: Tier 2 fails, the file is queued, and Tier 1 is persisted.
+	firstOut := run()
+	assert.Contains(t, firstOut, "1 files left unrecovered")
+	data, err := os.ReadFile(filePath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "id: retry",
+		"the first run must persist Tier 1 for the failed file")
+
+	// Second run: the file must be reprocessed — Tier 2 attempted again,
+	// queued again, reported failed again — not skipped as already complete.
+	secondOut := run()
+	assert.Contains(t, secondOut, "Model enriching retry.md",
+		"the second run must retry Tier 2 for the failed file, not skip it as already complete")
+	assert.Contains(t, secondOut, "1 files left unrecovered",
+		"the retried file must be queued and reported again")
+	assert.Contains(t, secondOut, "0 skipped. 0 recovered via LLM fallback. 1 failed.",
+		"a retried file must be counted failed again, not skipped")
+
+	// And the retry loop must leave the file in the same good state.
+	data, err = os.ReadFile(filePath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "id: retry",
+		"the retried-and-failed file must keep its Tier 1 frontmatter")
+}
+
 // Summary generation must be SKIPPED for queued files, not merely discarded.
 //
 // It used to run unconditionally, so every queued file paid for an LLM call
