@@ -176,8 +176,20 @@ func TestRunEnrich_QueuedFileLeavesSummaryEmptySoNextRunRetries(t *testing.T) {
 // keeps this retry loop alive, so this test guards it behaviorally.
 //
 // Deliberately does NOT re-assert the persisted summary here: that is the
-// empty-summary test's job, and keeping the two apart means a "persisted with
-// summary" regression trips the retry assertion below, not a duplicate.
+// empty-summary test's job, and keeping the two apart avoids a duplicate
+// assertion.
+//
+// SCOPE — read this before trusting the test to guard the summary skip. The
+// mock endpoint fails the summary call as well as the entities call, so
+// merged.Summary ends up empty whether or not the skip exists. Removing the
+// summary skip does NOT break this test. What it does guard is the observable
+// consequence — the file is reprocessed rather than skipped as complete — for
+// the failure mode its mock actually produces.
+//
+// The summary-skip mechanism itself is guarded elsewhere, and does fail
+// without the skip: TestRunEnrich_QueuedFileLeavesSummaryEmptySoNextRunRetries
+// pins the persisted value, and TestRunEnrich_QueuedFileSkipsSummaryGeneration
+// pins the request count (one call instead of two).
 func TestRunEnrich_FailedFileIsRetriedOnNextRun(t *testing.T) {
 	dir := t.TempDir()
 	// Always unparseable: both runs fail Tier 2 the same way, so the only
