@@ -2,10 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -248,7 +250,14 @@ func TestRunEnrich_DryRunWithQueuedFileDoesNotPanicOrWrite(t *testing.T) {
 	original := "# Dry Doc\n\nBody with a #tag and [[wikilink]].\n"
 	queued := filepath.Join(dir, "queued.md")
 	require.NoError(t, os.WriteFile(queued, []byte(original), 0644))
-	// A second file, so a stray index assignment would land on its row.
+	// A second file, also queued (the endpoint always returns the same
+	// unparseable content), so dry run must leave it untouched too. Note it
+	// does NOT give the old indexing bug a row to land on: queued files get
+	// no results row in dry run, so the pre-fix code panicked on the very
+	// first queue entry. The silent variant — where a skipped file's row IS
+	// overwritten and that file vanishes from the report — needs a file that
+	// produces a row of its own; that is what
+	// TestRunEnrich_DryRunQueuedFileLeavesOtherRowsIntact below covers.
 	other := filepath.Join(dir, "other.md")
 	require.NoError(t, os.WriteFile(other, []byte("# Other\n\nBody.\n"), 0644))
 
@@ -282,6 +291,78 @@ func TestRunEnrich_DryRunWithQueuedFileDoesNotPanicOrWrite(t *testing.T) {
 	}
 	assert.Contains(t, buf.String(), "would be queued for LLM fallback",
 		"the queued file must be reported")
+}
+
+// The silent variant of the dry-run indexing bug: not a panic, a clobber.
+//
+// When a file processed AFTER the queued one appends a results row of its own
+// (here: skipped by --skip-existing), the queued file's resultIdx pointed at
+// THAT row, so the pre-fix dry-run block overwrote it — the skipped file
+// vanished from the JSON report and the command still exited 0. The fix must
+// report BOTH files, each with its own status.
+//
+// Walk order matters and is lexical: a-queued.md is processed first, so it is
+// enqueued with resultIdx 0 before b-skipped.md appends the only pre-existing
+// row. (A queued file that sorted second would make the pre-fix code panic
+// instead — that variant is the test above.)
+func TestRunEnrich_DryRunQueuedFileLeavesOtherRowsIntact(t *testing.T) {
+	dir := t.TempDir()
+	srv := writeOrderTestEndpoint(t)
+
+	queued := filepath.Join(dir, "a-queued.md")
+	require.NoError(t, os.WriteFile(queued,
+		[]byte("# Queued Doc\n\n#tag and [[wikilink]].\n"), 0644))
+	skipped := filepath.Join(dir, "b-skipped.md")
+	require.NoError(t, os.WriteFile(skipped,
+		[]byte("---\nid: b-skipped\ntitle: Skipped\n---\n# Skipped\n\nBody.\n"), 0644))
+
+	// The per-file rows are only printed with --json, a root-level flag the
+	// detached enrich command does not carry; runEnrich reads the jsonOutput
+	// package global, so set it directly.
+	jsonOutput = true
+	defer func() { jsonOutput = false }()
+
+	cmd := newEnrichCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{
+		dir,
+		"--dry-run",
+		"--skip-existing",
+		"--model", "test-model",
+		"--format", "nuextract",
+		"--endpoint", srv.URL,
+		"--timeout", "10s",
+	})
+	resetEnrichFlags()
+	enrichDryRun = true
+	enrichSkipExist = true
+	enrichModel = "test-model"
+	enrichFormat = "nuextract"
+	enrichEndpoint = srv.URL
+	enrichTimeout = 10 * time.Second
+
+	// Pre-fix this did NOT panic — that is the point: the failure was
+	// silent, so it must be caught in the report, asserted below.
+	require.NoError(t, cmd.Execute())
+	assert.Contains(t, buf.String(), "Dry-run: 1 files would be queued for LLM fallback.",
+		"the queued file must be reported")
+
+	// Both files must appear in the JSON report, each with its own status.
+	idx := strings.Index(buf.String(), "{\n  \"enriched\"")
+	require.GreaterOrEqual(t, idx, 0, "no JSON report found in output:\n%s", buf.String())
+	var report struct {
+		Files []enrichResult `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(buf.String()[idx:]), &report))
+	require.Len(t, report.Files, 2,
+		"both files must be reported; pre-fix the queued file's row overwrote the skipped file's row. Output:\n%s", buf.String())
+	byPath := map[string]string{}
+	for _, f := range report.Files {
+		byPath[f.Path] = f.Status
+	}
+	assert.Equal(t, "fallback-pending-dry-run", byPath[queued])
+	assert.Equal(t, "skipped", byPath[skipped])
 }
 
 // A dry run that queues nothing must still write nothing.
