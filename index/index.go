@@ -155,7 +155,17 @@ func Import(data *IndexData) *KnowledgeIndex {
 // buildIndex is the single funnel for both Load and Import, which is why the
 // B1/B3 fixes live here rather than in either caller: one place, no path that
 // can be forgotten.
+//
+// No knowledge-base root is assumed; see buildIndexAt for the variant that
+// takes one. Callers that know the root should use it, because a derived ID
+// built from an absolute path is machine-dependent.
 func buildIndex(pages []*schema.Page) *KnowledgeIndex {
+	return buildIndexAt(pages, "")
+}
+
+// buildIndexAt is buildIndex with an explicit knowledge-base root, used to make
+// derived IDs relative rather than absolute.
+func buildIndexAt(pages []*schema.Page, root string) *KnowledgeIndex {
 	idx := &KnowledgeIndex{
 		byID:             make(map[string]*schema.Page, len(pages)),
 		byTag:            make(map[string][]*schema.Page),
@@ -168,7 +178,7 @@ func buildIndex(pages []*schema.Page) *KnowledgeIndex {
 	// B3: give every page an identity before anything is keyed on it. Without
 	// this, every page lacking a MarkedUp ID collides on "" and all but one
 	// silently vanish from the graph.
-	idx.derivedIDs = assignDerivedIDs(pages)
+	idx.derivedIDs = assignDerivedIDs(pages, root)
 
 	// The resolver needs the final ID set, so it runs after ID assignment.
 	resolver := newTargetResolver(pages)

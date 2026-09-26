@@ -281,8 +281,10 @@ func Load(ctx context.Context, root string, opts ...LoadOption) (*LoadResult, er
 		}
 	}
 
-	// 5. Build index single-threaded.
-	idx := buildIndex(pages)
+	// 5. Build index single-threaded. The root is passed so any ID we have to
+	// derive is relative to the knowledge base rather than to an absolute,
+	// machine-specific path (B3).
+	idx := buildIndexAt(pages, root)
 
 	// 6. Report dangling relationships.
 	//

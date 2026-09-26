@@ -1,6 +1,7 @@
 package index
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Clarit-AI/markedup/schema"
@@ -233,21 +234,27 @@ func TestExplicitIDWinsOverDerived(t *testing.T) {
 
 // A page whose source path is bare (no directory) still needs a stable ID.
 func TestDeriveIDHandlesBareAndMissingPaths(t *testing.T) {
+	// With a root, the whole relative path is kept so same-named files in
+	// different directories do not collide.
 	cases := []struct{ name, path, want string }{
-		{"bare filename", "notes.md", "notes"},
-		{"nested", "a/b/c.md", "a-b-c"},
-		{"no extension", "readme", "readme"},
+		{"bare filename", "/kb/notes.md", "notes"},
+		{"nested", "/kb/a/b/c.md", "a-b-c"},
+		{"no extension", "/kb/readme", "readme"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := deriveID(&schema.Page{SourcePath: tc.path})
+			got := deriveID(&schema.Page{SourcePath: tc.path}, "/kb")
 			if got != tc.want {
-				t.Errorf("deriveID(%q) = %q, want %q", tc.path, got, tc.want)
+				t.Errorf("deriveID(%q, /kb) = %q, want %q", tc.path, got, tc.want)
 			}
 		})
 	}
+	// With no root, only the filename survives — still machine-independent.
+	if got := deriveID(&schema.Page{SourcePath: "/a/b/notes.md"}, ""); got != "notes" {
+		t.Errorf("rootless deriveID = %q, want %q", got, "notes")
+	}
 	// No path and no title must still yield something usable, not "".
-	if got := deriveID(&schema.Page{}); got == "" {
+	if got := deriveID(&schema.Page{}, ""); got == "" {
 		t.Error("deriveID returned empty string for an empty page")
 	}
 }
@@ -371,6 +378,52 @@ func TestIndexBuildIsDeterministic(t *testing.T) {
 		if sum.Stats.Pages != firstSummary.Stats.Pages {
 			t.Fatalf("run %d: page count changed: %d vs %d", run, sum.Stats.Pages, firstSummary.Stats.Pages)
 		}
+	}
+}
+
+// The same document, checked out at two different absolute paths, must get
+// the same ID. Absolute paths in a derived ID make the graph cache
+// machine-dependent: it invalidates on every CI run and cross-references break
+// when the knowledge base moves.
+func TestDerivedIDsAreMachineIndependent(t *testing.T) {
+	build := func(root, abs string) string {
+		p := &schema.Page{SourcePath: abs}
+		buildIndexAt([]*schema.Page{p}, root)
+		return p.Frontmatter.ID
+	}
+
+	here := build("/Users/alice/kb", "/Users/alice/kb/notes/api.md")
+	ci := build("/srv/ci/checkout", "/srv/ci/checkout/notes/api.md")
+	unknown := build("", "/Users/alice/kb/notes/api.md")
+
+	if here != ci {
+		t.Errorf("same document at two roots got different IDs: %q vs %q", here, ci)
+	}
+	if strings.Contains(here, "users") || strings.Contains(here, "alice") ||
+		strings.Contains(here, "tmp") || strings.Contains(here, "srv") {
+		t.Errorf("derived ID %q leaks an absolute path segment", here)
+	}
+	// With no root we fall back to the bare filename, which is still stable.
+	if unknown != "api" {
+		t.Errorf("rootless deriveID = %q, want %q", unknown, "api")
+	}
+	if here != "notes-api" {
+		t.Errorf("rooted deriveID = %q, want %q", here, "notes-api")
+	}
+}
+
+// A path outside the declared root must not produce a ".."-prefixed ID.
+func TestDerivedIDIgnoresPathsOutsideRoot(t *testing.T) {
+	p := &schema.Page{SourcePath: "/elsewhere/notes/api.md"}
+	buildIndexAt([]*schema.Page{p}, "/users/alice/kb")
+	if p.Frontmatter.ID == "" {
+		t.Fatal("out-of-root path produced an empty ID")
+	}
+	if strings.Contains(p.Frontmatter.ID, "..") {
+		t.Errorf("derived ID %q leaks a parent-directory prefix", p.Frontmatter.ID)
+	}
+	if strings.Contains(p.Frontmatter.ID, "users") || strings.Contains(p.Frontmatter.ID, "alice") {
+		t.Errorf("derived ID %q leaks an absolute path segment", p.Frontmatter.ID)
 	}
 }
 

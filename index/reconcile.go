@@ -58,18 +58,36 @@ func reconcileKey(s string) string {
 }
 
 // deriveID produces a stable identifier for a page that has no MarkedUp ID.
-// Stability matters: the ID must be identical across runs and across machines,
-// or the cache invalidates itself every load and cross-references break.
 //
-// The source path is the only input guaranteed to exist and to be unique within
-// a knowledge base, so it is the basis. On the (rare) collision, a short hash of
-// the full path disambiguates — a function of the path alone, never of map
-// iteration order, so the result does not depend on the order pages were
-// parsed in.
-func deriveID(p *schema.Page) string {
+// Stability matters more than it looks: the ID must be identical across runs
+// AND across machines, or the graph cache invalidates itself on every load and
+// cross-references break when the knowledge base is checked out elsewhere.
+//
+// That rules out the absolute path. /Users/alice/kb/notes/api.md and
+// /srv/ci/kb/notes/api.md are the same document and must get the same ID, so
+// the path is made relative to the knowledge-base root first. Only when no
+// root is known (Import from a cache, direct buildIndex in tests) do we fall
+// back to the bare filename — still machine-independent, and collisions are
+// resolved deterministically below.
+func deriveID(p *schema.Page, root string) string {
 	base := p.SourcePath
-	if base == "" {
+	switch {
+	case base == "":
 		base = p.Frontmatter.Title
+	case root != "":
+		// Prefer the path relative to the knowledge base: same on every
+		// machine, and still unique across directories.
+		if rel, err := filepath.Rel(root, base); err == nil && !strings.HasPrefix(rel, "..") {
+			base = rel
+		} else {
+			base = filepath.Base(base)
+		}
+	default:
+		// No root to be relative to. The bare filename is still
+		// machine-independent, and any collision is resolved deterministically
+		// by assignDerivedIDs — a better trade than baking an absolute path
+		// into the ID.
+		base = filepath.Base(base)
 	}
 	if base == "" {
 		base = "untitled"
@@ -92,7 +110,8 @@ func disambiguationSuffix(path string) string {
 }
 
 // assignDerivedIDs gives every page an ID, in place, and reports which pages
-// were given a derived one.
+// were given a derived one. root is the knowledge-base root the paths are
+// relative to; pass "" when it is unknown.
 //
 // Mutating the page is deliberate and load-bearing: if the index keyed a page
 // under a derived ID while the page's own Frontmatter.ID stayed "", then Get()
@@ -104,7 +123,7 @@ func disambiguationSuffix(path string) string {
 // A page that ALREADY has an ID is never touched, even if it collides with a
 // derived one; explicit IDs always win over derived ones. The order is
 // therefore: pass 1 reserves all explicit IDs, pass 2 fills the gaps.
-func assignDerivedIDs(pages []*schema.Page) map[string]struct{} {
+func assignDerivedIDs(pages []*schema.Page, root string) map[string]struct{} {
 	derived := make(map[string]struct{})
 
 	taken := make(map[string]struct{}, len(pages))
@@ -129,7 +148,7 @@ func assignDerivedIDs(pages []*schema.Page) map[string]struct{} {
 		if p.Frontmatter.ID != "" {
 			continue
 		}
-		id := deriveID(p)
+		id := deriveID(p, root)
 		if _, exists := taken[id]; exists {
 			// Disambiguate with a hash of the full path. A SHA-256 prefix
 			// collision is not a real-world concern, but walk a counter anyway
