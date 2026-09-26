@@ -59,16 +59,25 @@ type corpusReport struct {
 }
 
 type b1Report struct {
-	Pages            int `json:"pages"`
-	Relationships    int `json:"relationships"`
-	Entities         int `json:"entities"`
-	GraphRels        int `json:"graph_relationships"`
+	Pages         int `json:"pages"`
+	Relationships int `json:"relationships"`
+	Entities      int `json:"entities"`
+	GraphRels     int `json:"graph_relationships"`
 
-	// The B1 mechanism, stated as a count: Tier-1 wikilinks that DO land in
-	// Frontmatter.Relationships and are therefore traversable, versus the
-	// SemanticRelationships the Tier-2 path writes that nothing reads.
+	// The B1 mechanism, stated as a count. Before Phase 1,
+	// SemanticRelationshipsRead was structurally 0 by construction — the field
+	// was written by Tier 2 and read by nothing. It is now the number of NER
+	// edges that actually reached traversal.
 	SemanticRelationshipsTotal int `json:"semantic_relationships_total"`
 	SemanticRelationshipsRead  int `json:"semantic_relationships_read"`
+
+	// Phase 1 output: how much of the graph is usable, and how much of it
+	// points at nothing.
+	DanglingTargets      int      `json:"dangling_targets"`
+	DanglingTargetNames  []string `json:"dangling_target_names"`
+	DerivedIDs           int      `json:"derived_ids"`
+	AmbiguousAliasCount  int      `json:"ambiguous_alias_count"`
+	SummaryDanglingCount int      `json:"summary_dangling_count"`
 
 	ReachablePages int      `json:"reachable_pages"`
 	UnreachableIDs []string `json:"unreachable_page_ids"`
@@ -172,7 +181,7 @@ func summarizeCorpus(pages []*schema.Page) corpusReport {
 
 // probeB1 is the live equivalent of the 2026-09-19 audit probe. It builds the
 // real index and reports what the graph can actually traverse, alongside the
-// SemanticRelationships that are on disk but unread.
+// SemanticRelationships that used to be written and never read.
 func probeB1(pages []*schema.Page) b1Report {
 	idx := buildIndex(pages)
 
@@ -183,8 +192,28 @@ func probeB1(pages []*schema.Page) b1Report {
 		GraphRels:     len(idx.adjacency),
 	}
 
+	// The B1 mechanism, quantified. `written` is what Tier 2 produced; `read`
+	// is what actually reached traversal. Pre-Phase 1 these were 0 and 0 for a
+	// structural reason, not an empirical one.
+	for _, p := range pages {
+		rep.SemanticRelationshipsTotal += len(p.Frontmatter.SemanticRelationships)
+	}
+	_, rep.SemanticRelationshipsRead = idx.SemanticEdgeStats()
+
+	rep.DanglingTargets = len(idx.danglingTargets)
+	rep.DanglingTargetNames = idx.DanglingTargets()
+	rep.DerivedIDs = len(idx.derivedIDs)
+	rep.AmbiguousAliasCount = len(idx.AmbiguousAliases())
+	rep.SummaryDanglingCount = idx.CompactGraphSummary().Stats.DanglingTargets
+
 	// Reachability: a page is reachable if it has a forward edge or is the
 	// target of someone else's edge.
+	//
+	// NOTE: this counts a page as "reachable" when an edge merely names it,
+	// even if that name resolves to no real page. It is therefore an UPPER
+	// BOUND on useful reachability, not a measure of it — a graph of nothing
+	// but dangling edges scores 100% here. DanglingTargets is the honest
+	// companion number; read them together.
 	reachable := map[string]struct{}{}
 	for id, rels := range idx.adjacency {
 		if len(rels) > 0 {
@@ -201,14 +230,6 @@ func probeB1(pages []*schema.Page) b1Report {
 		}
 	}
 	sort.Strings(rep.UnreachableIDs)
-
-	// The B1 mechanism, quantified: SemanticRelationships exist on the pages
-	// but graph_summary and index only ever read Frontmatter.Relationships.
-	// We count the first (what is written) and the second (what is read).
-	for _, p := range pages {
-		rep.SemanticRelationshipsTotal += len(p.Frontmatter.SemanticRelationships)
-		rep.SemanticRelationshipsRead += 0 // by construction: nothing reads it
-	}
 	return rep
 }
 
