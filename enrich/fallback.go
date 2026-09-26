@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -29,6 +30,87 @@ import (
 	"github.com/Clarit-AI/markedup/llm"
 	"github.com/Clarit-AI/markedup/schema"
 )
+
+// schemaModeCache records, per endpoint, whether `response_format: json_schema`
+// is supported. Keyed by endpoint URL; the value is a bool.
+//
+// This replaces a hard-coded `SchemaMode: !isLocal` guess, which was wrong in
+// both directions: some local runtimes (vLLM) do support json_schema, and some
+// hosted endpoints do not. Either mismatch produced a hard HTTP 400 and killed
+// the run.
+//
+// The resolution is REACTIVE, not a startup probe. A probe would mean a real,
+// billable inference request on every invocation before any real work — and it
+// would still be a guess, since a single successful probe says nothing about
+// the next request. Instead we start from the previous heuristic, and let the
+// first real request teach us the truth: if the endpoint rejects the schema
+// parameter, we degrade and remember, so the cost is paid at most once per
+// endpoint per process.
+var schemaModeCache sync.Map // endpoint string -> bool
+
+// ResolveSchemaMode reports whether to send response_format=json_schema to the
+// given endpoint.
+//
+// Precedence:
+//  1. MARKEDUP_LLM_SCHEMA_MODE=1|0 forces the answer and skips the cache
+//     entirely. This is the override for offline runs, tests, and operators
+//     who know their endpoint's capability.
+//  2. A previously learned answer for this endpoint.
+//  3. The historical heuristic (non-local endpoints are assumed to support it).
+//
+// It performs no network I/O.
+func ResolveSchemaMode(endpoint string, isLocal bool) bool {
+	switch os.Getenv("MARKEDUP_LLM_SCHEMA_MODE") {
+	case "1", "true", "yes":
+		return true
+	case "0", "false", "no":
+		return false
+	}
+	if cached, ok := schemaModeCache.Load(endpoint); ok {
+		return cached.(bool)
+	}
+	mode := !isLocal
+	schemaModeCache.Store(endpoint, mode)
+	return mode
+}
+
+// noteSchemaMode records what an endpoint actually demonstrated.
+func noteSchemaMode(endpoint string, supported bool) {
+	if endpoint == "" {
+		return
+	}
+	schemaModeCache.Store(endpoint, supported)
+}
+
+// ResetSchemaModeCache clears the learned per-endpoint answers. Exported for
+// tests, which must not inherit another test's endpoint verdict.
+func ResetSchemaModeCache() {
+	schemaModeCache.Range(func(k, _ any) bool {
+		schemaModeCache.Delete(k)
+		return true
+	})
+}
+
+// IsSchemaRejection reports whether an error looks like the endpoint refusing
+// the response_format parameter specifically, as opposed to any other 400.
+//
+// Being conservative here matters: degrading on an unrelated 400 (a bad model
+// name, a context-length overflow) would silently drop structured output for a
+// capability the endpoint does have, and would cache that wrong conclusion.
+func IsSchemaRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "status 400") {
+		return false
+	}
+	// The parameter is named in the rejection, or the endpoint said the
+	// response_format value was invalid. Either is conclusive enough.
+	return strings.Contains(msg, "response_format") ||
+		strings.Contains(msg, "json_schema") ||
+		strings.Contains(msg, "schema")
+}
 
 // ErrParse is the sentinel error returned (wrapped) by Tier 2 extractors when
 // the model's raw output cannot be parsed as the expected JSON shape, even
@@ -91,6 +173,7 @@ type LLMFallbackExtractor struct {
 	client     *llm.Client
 	model      string
 	schemaMode bool
+	endpoint   string
 }
 
 // LLMFallbackConfig configures LLMFallbackExtractor.
@@ -118,6 +201,7 @@ func NewLLMFallbackExtractor(cfg LLMFallbackConfig) *LLMFallbackExtractor {
 		client:     llm.NewClient(lc),
 		model:      cfg.Model,
 		schemaMode: cfg.SchemaMode,
+		endpoint:   cfg.Endpoint,
 	}
 }
 
@@ -230,7 +314,26 @@ func (e *LLMFallbackExtractor) Extract(ctx context.Context, body string, entityT
 
 	content, err := e.client.ChatCompletionWith(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("enrich fallback: %w", err)
+		// The endpoint may simply not support response_format. Degrade once,
+		// remember the answer for every later call in this process, and retry
+		// unconstrained rather than failing the run (#144).
+		//
+		// The prompt still demands bare JSON and the parser below is the same
+		// tolerant one the non-schema path has always used, so a degraded call
+		// degrades only the guarantee, not the function.
+		if e.schemaMode && IsSchemaRejection(err) {
+			noteSchemaMode(e.endpoint, false)
+			e.schemaMode = false
+			req.Extra = nil
+			content, err = e.client.ChatCompletionWith(ctx, req)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("enrich fallback: %w", err)
+		}
+	} else if e.schemaMode {
+		// The endpoint accepted the schema — record that so a later process
+		// starts from a learned truth rather than the heuristic.
+		noteSchemaMode(e.endpoint, true)
 	}
 
 	return parseFallbackPayload(content)

@@ -281,19 +281,36 @@ func Load(ctx context.Context, root string, opts ...LoadOption) (*LoadResult, er
 		}
 	}
 
-	// 5. Build index single-threaded.
-	idx := buildIndex(pages)
+	// 5. Build index single-threaded. The root is passed so any ID we have to
+	// derive is relative to the knowledge base rather than to an absolute,
+	// machine-specific path (B3).
+	idx := buildIndexAt(pages, root)
 
-	// 6. Check for dangling relationships.
+	// 6. Report dangling relationships.
+	//
+	// buildIndex has already reconciled both relationship fields, so this
+	// reports the index's own verdict rather than re-deriving it from raw
+	// frontmatter. Re-deriving here would double-count: a wikilink target that
+	// reconciles to a page via its title is NOT dangling, and checking the raw
+	// Target string would wrongly flag it.
+	byIDPage := make(map[string]*schema.Page, len(pages))
 	for _, p := range pages {
-		for _, rel := range p.Frontmatter.Relationships {
-			if _, ok := idx.byID[rel.Target]; !ok {
-				warnings = append(warnings, LoadWarning{
-					Path:    p.SourcePath,
-					Message: fmt.Sprintf("dangling relationship: target %q not found in index", rel.Target),
-				})
-			}
+		byIDPage[p.Frontmatter.ID] = p
+	}
+	for _, d := range idx.DanglingRefs() {
+		source := ""
+		if p, ok := byIDPage[d.From]; ok {
+			source = p.SourcePath
 		}
+		origin := "relationship"
+		if d.Semantic {
+			origin = "semantic-relationship"
+		}
+		warnings = append(warnings, LoadWarning{
+			Path: source,
+			Message: fmt.Sprintf("dangling %s: target %q not found in index",
+				origin, d.Target),
+		})
 	}
 
 	// 7. Save to graph cache if configured.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/Clarit-AI/markedup/llm"
 	"github.com/Clarit-AI/markedup/schema"
@@ -28,6 +29,61 @@ var DefaultEntityTypes = []string{
 // DefaultPredicates are the relationship predicates used when none are specified.
 var DefaultPredicates = []string{
 	"related-to", "derived-from", "implements", "depends-on", "created-by", "part-of", "used-by",
+}
+
+// Mapping from nuextract entity types (uppercase) to canonical ValidEntityTypes (lowercase).
+var entityTypeMap = map[string]string{
+	"PERSON":       "person",
+	"ORGANIZATION": "organization",
+	"CONCEPT":      "concept",
+	"PROJECT":      "project",
+	"EVENT":        "event",
+	"LOCATION":     "place",
+	"OTHER":        "document",
+	"DATE":         "event",
+}
+
+// residualCount is the number of entity types that could not be mapped to a
+// canonical label since the last reset.
+//
+// It is process-global rather than per-call because the merge functions return
+// a bare GraphFrontmatter and threading a side-channel return through every
+// caller would be a much larger change than the defect is worth. The cost is
+// that it is a process-wide running total, not a per-document count — read it
+// as "how many residuals has this run produced", never as a per-page property.
+//
+// It is atomic because the enrich CLI and RunFallbackBatch both process files
+// concurrently; a plain int here is a data race, not a slow counter.
+var residualCount atomic.Int64
+
+// ResetResidualCount resets the residual count to zero, mainly for testing.
+// Returns the previous value.
+func ResetResidualCount() int {
+	return int(residualCount.Swap(0))
+}
+
+// GetResidualCount returns the current residual count.
+func GetResidualCount() int {
+	return int(residualCount.Load())
+}
+
+// normalizeDocumentEntityType converts an extracted entity type to a canonical
+// ValidEntityTypes value, or returns an empty string and true if it cannot be
+// mapped (residual). The input is case-insensitive.
+func normalizeDocumentEntityType(input string) (string, bool) {
+	if input == "" {
+		return "", false
+	}
+	upper := strings.ToUpper(input)
+	if mapped, ok := entityTypeMap[upper]; ok {
+		return mapped, false
+	}
+	lower := strings.ToLower(input)
+	if schema.IsValidEntityType(lower) {
+		return lower, false
+	}
+	// Unmappable/residual (e.g. TECHNOLOGY)
+	return "", true
 }
 
 // ModelConfig configures the chat completion client for Tier 2 extraction.
@@ -353,11 +409,13 @@ func MergeModelResult(existing schema.GraphFrontmatter, model *ModelResult, opts
 		// preserve any prior non-"document" classification (user or prior
 		// confident run). "document" is the default fallback and may be
 		// promoted. See issue #128.
-		if schema.IsValidEntityType(model.EntityType) {
+		normalized, isResidual := normalizeDocumentEntityType(model.EntityType)
+		if isResidual {
+			residualCount.Add(1)
+		} else if normalized != "" {
 			if existing.EntityType == "" || strings.ToLower(existing.EntityType) == "document" {
-				result.EntityType = strings.ToLower(model.EntityType)
+				result.EntityType = normalized
 			}
-			// else: keep existing — don't let Tier 2 overwrite a real type.
 		}
 		// else: model returned empty or out-of-whitelist garbage → keep existing.
 		if model.Summary != "" {
@@ -385,11 +443,15 @@ func MergeModelResult(existing schema.GraphFrontmatter, model *ModelResult, opts
 	// Whitelist + sticky-for-non-default: same policy as force branch, see #128.
 	// In default mode the check collapses to "fill if existing is empty or
 	// default (document)" — a real existing type is never overwritten.
-	if schema.IsValidEntityType(model.EntityType) {
+	normalized, isResidual := normalizeDocumentEntityType(model.EntityType)
+	if isResidual {
+		residualCount.Add(1)
+	} else if normalized != "" {
 		if result.EntityType == "" || strings.ToLower(result.EntityType) == "document" {
-			result.EntityType = strings.ToLower(model.EntityType)
+			result.EntityType = normalized
 		}
 	}
+	// else: model returned empty or out-of-whitelist garbage → keep existing.
 	if result.Summary == "" && model.Summary != "" {
 		result.Summary = model.Summary
 	}

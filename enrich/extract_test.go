@@ -145,6 +145,26 @@ func TestExtractWikilinks(t *testing.T) {
 			body:    "No wikilinks here.",
 			targets: nil,
 		},
+		{
+			name:    "wikilink in fenced code block skipped",
+			body:    "```\nSee [[Skip Me]]\n```\n[[Keep Me]]",
+			targets: []string{"keep-me"},
+		},
+		{
+			name:    "wikilink in inline code span skipped",
+			body:    "See `[[Skip Me]]` here, but [[Keep Me]] also.",
+			targets: []string{"keep-me"},
+		},
+		{
+			name:    "genuine prose wikilink kept",
+			body:    "This is a real [[WikiLink]] in text.",
+			targets: []string{"wikilink"},
+		},
+		{
+			name:    "mixed document: fenced, inline, and prose",
+			body:    "Before fence.\n```\n[[Skip in fence]]\n```\nAfter fence.\nSee `[[Skip in inline]]` and [[Keep Me]].",
+			targets: []string{"keep-me"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -275,4 +295,67 @@ func TestStripCodeFences(t *testing.T) {
 	assert.Contains(t, result, "Before")
 	assert.Contains(t, result, "After")
 	assert.NotContains(t, result, "Inside fence")
+}
+
+// An unpaired backtick must not swallow the rest of the document.
+//
+// stripCode removes the text between paired backticks, which is the intended
+// trade — but the original implementation dropped everything after a stray
+// backtick too, silently deleting real wikilinks, hashtags and URLs from the
+// remainder of the file. A typo in a code span cost the whole document its
+// relationships. Per CommonMark an unmatched backtick is literal text, so the
+// trailing segment is content and must survive.
+func TestExtractWikilinks_UnpairedBacktickDoesNotTruncate(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{
+			name: "stray backtick mid-document",
+			body: "text with ` stray [[Real]] more",
+			want: []string{"real"},
+		},
+		{
+			name: "three backticks, last unterminated",
+			body: "`a` `b` [[Real]] `",
+			want: []string{"real"},
+		},
+		{
+			name: "unpaired backtick before a hashtag",
+			body: "oops ` here\n\n#important [[Real]]",
+			want: []string{"real"},
+		},
+		{
+			name: "matched spans still removed",
+			body: "`[[Fake]]` and [[Real]]",
+			want: []string{"real"},
+		},
+		{
+			name: "even count unaffected",
+			body: "`x` [[One]] `y` [[Two]]",
+			want: []string{"one", "two"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rels := extractWikilinks(tc.body)
+			got := make([]string, 0, len(rels))
+			for _, r := range rels {
+				got = append(got, r.Target)
+			}
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// The same truncation hazard applies to hashtags, which share the same
+// stripping path.
+func TestExtractHashtags_UnpairedBacktickDoesNotTruncate(t *testing.T) {
+	// Before the fix this returned nothing at all: the stray backtick put
+	// every remaining segment on an odd index and they were all discarded.
+	tags := extractHashtags("oops ` here\n\n#important and #second")
+	assert.Contains(t, tags, "important")
+	assert.Contains(t, tags, "second")
 }
