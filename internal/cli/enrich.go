@@ -350,8 +350,22 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 			if relPath == "" {
 				relPath = filepath.Base(filePath)
 			}
+
 			printDryRun(out, relPath, &merged)
 			enriched++
+			continue
+		}
+
+		// If this file was queued for fallback (Tier 2 parse-error), record
+		// it as pending — the dispatcher below will rewrite the row to
+		// "recovered" or "failed" once the batch completes. Pending rows are
+		// NOT counted toward `enriched` so the summary's primary/recovered/
+		// failed split stays clean.
+		queuedForFallback := len(fallbackQueue) > 0 &&
+			fallbackQueue[len(fallbackQueue)-1].job.Path == filePath &&
+			fallbackQueue[len(fallbackQueue)-1].resultIdx == len(results)
+		if queuedForFallback {
+			results = append(results, enrichResult{Path: filePath, Status: "pending-fallback"})
 			continue
 		}
 
@@ -366,19 +380,6 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 		if writeErr := markdown.WriteFrontmatterFile(filePath, content); writeErr != nil {
 			results = append(results, enrichResult{Path: filePath, Status: "error", Reason: writeErr.Error()})
 			errors++
-			continue
-		}
-
-		// If this file was queued for fallback (Tier 2 parse-error), record
-		// it as pending — the dispatcher below will rewrite the row to
-		// "recovered" or "failed" once the batch completes. Pending rows are
-		// NOT counted toward `enriched` so the summary's primary/recovered/
-		// failed split stays clean.
-		queuedForFallback := len(fallbackQueue) > 0 &&
-			fallbackQueue[len(fallbackQueue)-1].job.Path == filePath &&
-			fallbackQueue[len(fallbackQueue)-1].resultIdx == len(results)
-		if queuedForFallback {
-			results = append(results, enrichResult{Path: filePath, Status: "pending-fallback"})
 			continue
 		}
 
