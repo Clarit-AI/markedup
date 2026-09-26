@@ -409,6 +409,26 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 			Predicates:  p.job.Predicates,
 		})
 	}
+	// persistTier1 writes the post-Tier-1 frontmatter for a file whose Tier 2
+	// fallback did NOT succeed. The main loop deliberately defers writing for
+	// any queued file so a crash mid-run cannot leave a half-enriched document
+	// (#145). Once the fallback outcome is known, however, "known to be
+	// Tier-1-only" is a final answer, not an interrupted one — the enrichment we
+	// legitimately produced should still land, exactly as it did before the
+	// write was deferred.
+	//
+	// Skipping this would be a silent regression: the summary would report N
+	// files left unrecovered while those files carried no Tier 1 enrichment at
+	// all, which is strictly less than the user got before.
+	//
+	// Dry-run never reaches here (the whole block is gated on !enrichDryRun).
+	persistTier1 := func(p fallbackPending) {
+		content, wErr := markdown.ReplaceFrontmatter(&p.preTier2, p.fileBytes)
+		if wErr != nil {
+			return
+		}
+		_ = markdown.WriteFrontmatterFile(p.job.Path, content)
+	}
 	if len(fallbackQueue) > 0 && !enrichDryRun {
 		// Resolve fallback config: explicit Enrich.Fallback fields fall back to
 		// the same MARKEDUP_LLM_* values that wire markedup_reason.
@@ -436,6 +456,7 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(out, "LLM fallback disabled — %d files left unrecovered.\n", len(fallbackQueue))
 			failedFallback = len(fallbackQueue)
 			for _, p := range fallbackQueue {
+				persistTier1(p)
 				results[p.resultIdx] = enrichResult{
 					Path:   p.job.Path,
 					Status: "fallback-skipped",
@@ -447,6 +468,7 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(out, "LLM fallback unavailable: MARKEDUP_LLM_ENDPOINT/MODEL not set — %d files left unrecovered.\n", len(fallbackQueue))
 			failedFallback = len(fallbackQueue)
 			for _, p := range fallbackQueue {
+				persistTier1(p)
 				results[p.resultIdx] = enrichResult{
 					Path:   p.job.Path,
 					Status: "fallback-skipped",
@@ -489,6 +511,7 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 				p := fallbackQueue[i]
 				if !oc.Recovered() {
 					failedFallback++
+					persistTier1(p)
 					results[p.resultIdx] = enrichResult{
 						Path:   p.job.Path,
 						Status: "failed",
@@ -536,6 +559,7 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 			for i := len(outcomes); i < len(fallbackQueue); i++ {
 				p := fallbackQueue[i]
 				failedFallback++
+				persistTier1(p)
 				results[p.resultIdx] = enrichResult{
 					Path: p.job.Path, Status: "fallback-skipped",
 					Reason: fmt.Sprintf("MaxFiles=%d cap reached", maxFiles),
