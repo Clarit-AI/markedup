@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,52 +112,180 @@ func TestRunEnrich_FailedTier2StillPersistsTier1(t *testing.T) {
 	assert.Contains(t, content, "wikilink")
 }
 
-// A crash between the two writes must leave the file exactly as it was.
+// A queued file must be written with Tier-1 content and an EMPTY summary.
 //
-// This is the property #145 asks for, and it is not directly observable by
-// running the command to completion — the crash is what we are trying to
-// prevent. What IS observable is the ordering invariant underneath it: for a
-// file that goes to fallback, the main loop must not perform a write before the
-// outcome is known.
+// The empty summary is load-bearing, not incidental. enrich.tier2Complete is
+// (Summary != ""), so persisting a summary would make the file look
+// Tier-2-complete; the next run would skip it as "already complete" and never
+// retry the Tier 2 that just failed. That is issue #145's hazard reached by an
+// ordinary successful run rather than a crash.
 //
-// We assert the weaker but checkable half — a file that never enters the
-// fallback queue is written by the main loop, and one that does is written
-// exactly once, by the fallback handler. Double-writing is the observable
-// signature of the old ordering, because the old code wrote and then wrote
-// again.
-func TestRunEnrich_QueuedFileIsWrittenExactlyOnce(t *testing.T) {
+// Before this was pinned, a file whose summary call happened to succeed was
+// written WITH the summary and became permanently stuck.
+func TestRunEnrich_QueuedFileLeavesSummaryEmptySoNextRunRetries(t *testing.T) {
 	dir := t.TempDir()
+	srv := writeOrderTestEndpoint(t)
 
-	// A file with no model configured: Tier 2 is off, so the main loop owns
-	// every write and the fallback path is never entered.
-	queued := filepath.Join(dir, "queued.md")
-	require.NoError(t, os.WriteFile(queued,
-		[]byte("# Queued Doc\n\n#alpha content.\n"), 0644))
+	filePath := filepath.Join(dir, "stuck.md")
+	require.NoError(t, os.WriteFile(filePath,
+		[]byte("# Stuck Doc\n\nBody with a #tag.\n"), 0644))
 
 	cmd := newEnrichCmd()
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
-	cmd.SetArgs([]string{dir})
+	cmd.SetArgs([]string{dir, "--model", "test-model", "--format", "nuextract",
+		"--endpoint", srv.URL, "--timeout", "10s"})
 	resetEnrichFlags()
-	// No --model/--endpoint: Tier 2 is off, so nothing is queued and the main
-	// loop owns every write.
+	enrichModel = "test-model"
+	enrichFormat = "nuextract"
+	enrichEndpoint = srv.URL
+	enrichTimeout = 10 * time.Second
+
 	require.NoError(t, cmd.Execute())
 
-	data, err := os.ReadFile(queued)
+	data, err := os.ReadFile(filePath)
 	require.NoError(t, err)
 	content := string(data)
 
-	// Exactly one frontmatter block. A second write would produce a nested or
-	// duplicated --- fence.
-	assert.Equal(t, 1, bytes.Count(data, []byte("\n---\n")),
-		"file should have exactly one frontmatter block, got:\n%s", content)
-	assert.Contains(t, content, "id: queued")
+	// Tier 1 content is present...
+	assert.Contains(t, content, "id: stuck")
+	assert.Contains(t, content, "entity-type: document")
+	// ...and the summary is empty, so tier2Complete is false and a later run
+	// will re-attempt Tier 2 instead of skipping the file forever.
+	assert.Contains(t, content, `summary: ""`,
+		"a queued file must not be persisted with a summary, or it looks Tier-2-complete and is never retried")
 }
 
-// Dry-run must still write nothing, including for files that would be queued
-// for fallback. The deferral must not have opened a path that persists during
-// a dry run.
-func TestRunEnrich_DryRunWritesNothingAfterDeferral(t *testing.T) {
+// Summary generation must be SKIPPED for queued files, not merely discarded.
+//
+// It used to run unconditionally, so every queued file paid for an LLM call
+// whose output was thrown away on all five persistTier1 paths.
+func TestRunEnrich_QueuedFileSkipsSummaryGeneration(t *testing.T) {
+	dir := t.TempDir()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant",` +
+			`"content":"unusable"}}]}`))
+	}))
+	defer srv.Close()
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "doc.md"),
+		[]byte("# Doc\n\nBody.\n"), 0644))
+
+	cmd := newEnrichCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	// --nuextract-mode single makes one document cost exactly one request.
+	// The default parallel mode issues a separate entities AND relations
+	// request, which would make the call count ambiguous.
+	cmd.SetArgs([]string{dir, "--model", "m", "--format", "nuextract",
+		"--nuextract-mode", "single", "--endpoint", srv.URL, "--timeout", "10s"})
+	resetEnrichFlags()
+	enrichModel = "m"
+	enrichFormat = "nuextract"
+	enrichNuExtractMode = "single"
+	enrichEndpoint = srv.URL
+	enrichTimeout = 10 * time.Second
+
+	require.NoError(t, cmd.Execute())
+
+	// Exactly one call: the single extraction request, which is what produced
+	// the parse error. A second would be the summary call we now skip.
+	assert.Equal(t, int32(1), calls.Load(),
+		"a file queued for fallback must not pay for a summary it will discard")
+}
+
+// A non-queued file still gets its summary — the skip must not leak.
+func TestRunEnrich_NonQueuedFileStillGeneratesSummary(t *testing.T) {
+	dir := t.TempDir()
+	var calls atomic.Int32
+	// This endpoint answers the entities call with valid JSON and the summary
+	// call with a summary, so nothing is queued.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant",` +
+			`"content":"{\"entities\":[],\"summary\":\"A real summary.\"}"}}]}`))
+	}))
+	defer srv.Close()
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "doc.md"),
+		[]byte("# Doc\n\nBody.\n"), 0644))
+
+	cmd := newEnrichCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{dir, "--model", "m", "--format", "nuextract",
+		"--endpoint", srv.URL, "--timeout", "10s"})
+	resetEnrichFlags()
+	enrichModel = "m"
+	enrichFormat = "nuextract"
+	enrichEndpoint = srv.URL
+	enrichTimeout = 10 * time.Second
+
+	require.NoError(t, cmd.Execute())
+
+	data, err := os.ReadFile(filepath.Join(dir, "doc.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "A real summary.",
+		"a file that was never queued must keep its generated summary")
+}
+
+// Dry run with a file queued for fallback must not panic and must not write.
+//
+// This is the test the previous dry-run test could not be: it configured no
+// model, so nothing was ever queued and the queue-reporting branch was
+// unreachable. Configuring a model that returns a parse error reaches it, and
+// it used to panic with "index out of range" — because the dry-run branch
+// `continue`s before appending a results row, so a queued file's resultIdx
+// pointed one past the end, or at a row belonging to a different file.
+func TestRunEnrich_DryRunWithQueuedFileDoesNotPanicOrWrite(t *testing.T) {
+	dir := t.TempDir()
+	srv := writeOrderTestEndpoint(t)
+
+	original := "# Dry Doc\n\nBody with a #tag and [[wikilink]].\n"
+	queued := filepath.Join(dir, "queued.md")
+	require.NoError(t, os.WriteFile(queued, []byte(original), 0644))
+	// A second file, so a stray index assignment would land on its row.
+	other := filepath.Join(dir, "other.md")
+	require.NoError(t, os.WriteFile(other, []byte("# Other\n\nBody.\n"), 0644))
+
+	cmd := newEnrichCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{dir, "--dry-run", "--model", "m", "--format", "nuextract",
+		"--endpoint", srv.URL, "--timeout", "10s"})
+	resetEnrichFlags()
+	enrichModel = "m"
+	enrichFormat = "nuextract"
+	enrichEndpoint = srv.URL
+	enrichDryRun = true
+	enrichTimeout = 10 * time.Second
+
+	require.NotPanics(t, func() {
+		require.NoError(t, cmd.Execute())
+	}, "dry run with a queued file panicked — the pending row is indexed, not appended")
+
+	// Nothing may be written, and the pending file must still be reported.
+	// Each file is compared against its OWN original content.
+	otherOriginal := "# Other\n\nBody.\n"
+	for _, tc := range []struct{ path, want string }{
+		{queued, original},
+		{other, otherOriginal},
+	} {
+		data, err := os.ReadFile(tc.path)
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, string(data),
+			"dry run must not modify %s", filepath.Base(tc.path))
+	}
+	assert.Contains(t, buf.String(), "would be queued for LLM fallback",
+		"the queued file must be reported")
+}
+
+// A dry run that queues nothing must still write nothing.
+func TestRunEnrich_DryRunWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	original := "# Untouched\n\n#tag and [[link]].\n"
 	filePath := filepath.Join(dir, "untouched.md")

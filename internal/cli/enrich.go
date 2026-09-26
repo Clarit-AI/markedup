@@ -295,6 +295,12 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 		merged := enrich.MergeFrontmatter(page.Frontmatter, extracted, opts)
 
 		// Tier 2: Model-assisted extraction (if --model specified).
+		//
+		// queuedForFallback is declared out here because the write decision
+		// below the block needs it, and it must mean the same thing in both
+		// places: this file's Tier 2 parse errored, so its write belongs to
+		// the fallback batch rather than to this loop.
+		queuedForFallback := false
 		if modelExtractor != nil {
 			relPath, _ := filepath.Rel(rootDir, filePath)
 			if relPath == "" {
@@ -325,13 +331,27 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 						fileBytes: data,
 						resultIdx: len(results), // index of the row appended below
 					})
+					queuedForFallback = true
 				}
 			} else {
 				merged = enrich.MergeModelResult(merged, modelResult, opts)
 			}
 
 			// Generate summary (separate call for focused one-sentence output).
-			if merged.Summary == "" || enrichForce {
+			//
+			// Skipped for files queued for fallback. Their write is deferred to
+			// persistTier1, which persists preTier2 — the merge captured
+			// BEFORE this block. So a summary generated here is discarded on
+			// every failure path: the call is paid for and thrown away.
+			//
+			// Worse, persisting it would be actively harmful.
+			// enrich.tier2Complete is (Summary != ""), so a file carrying a
+			// summary looks Tier-2-complete; a later run skips it as "already
+			// complete" and never retries the failed Tier 2. That is exactly
+			// the hazard #145 exists to prevent, reached by an ordinary
+			// successful run rather than a crash. Leaving the summary empty
+			// is what makes the retry happen, so the skip is deliberate.
+			if !queuedForFallback && (merged.Summary == "" || enrichForce) {
 				bodyPreview := enrich.BodyPreview(page.Body, 500)
 				summaryCtx, summaryCancel := context.WithTimeout(context.Background(), enrichTimeout)
 				summary, summaryErr := modelExtractor.GenerateSummary(summaryCtx, merged.Title, merged.EntityType, merged.Tags, bodyPreview)
@@ -361,9 +381,15 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 		// "recovered" or "failed" once the batch completes. Pending rows are
 		// NOT counted toward `enriched` so the summary's primary/recovered/
 		// failed split stays clean.
-		queuedForFallback := len(fallbackQueue) > 0 &&
-			fallbackQueue[len(fallbackQueue)-1].job.Path == filePath &&
-			fallbackQueue[len(fallbackQueue)-1].resultIdx == len(results)
+		//
+		// (Dry run is the exception: its branch above `continue`s before any
+		// row is appended, and counts the file toward `enriched` there. The
+		// dry-run block below appends the pending rows instead.)
+		if !queuedForFallback {
+			queuedForFallback = len(fallbackQueue) > 0 &&
+				fallbackQueue[len(fallbackQueue)-1].job.Path == filePath &&
+				fallbackQueue[len(fallbackQueue)-1].resultIdx == len(results)
+		}
 		if queuedForFallback {
 			results = append(results, enrichResult{Path: filePath, Status: "pending-fallback"})
 			continue
@@ -414,20 +440,30 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 	// any queued file so a crash mid-run cannot leave a half-enriched document
 	// (#145). Once the fallback outcome is known, however, "known to be
 	// Tier-1-only" is a final answer, not an interrupted one — the enrichment we
-	// legitimately produced should still land, exactly as it did before the
-	// write was deferred.
+	// legitimately produced should still land, which is what the pre-deferral
+	// code did.
 	//
-	// Skipping this would be a silent regression: the summary would report N
-	// files left unrecovered while those files carried no Tier 1 enrichment at
-	// all, which is strictly less than the user got before.
+	// Note it persists preTier2, which is captured BEFORE summary generation.
+	// That is deliberate and is what keeps a later run retrying the failed
+	// Tier 2: see the summary block in the main loop.
+	//
+	// Failures are reported. This function is the last chance to leave the file
+	// better than the run found it, so a silent failure here would leave the
+	// user with a "1 failed" line and no way to know the Tier-1 write they
+	// were implicitly promised never happened.
 	//
 	// Dry-run never reaches here (the whole block is gated on !enrichDryRun).
 	persistTier1 := func(p fallbackPending) {
 		content, wErr := markdown.ReplaceFrontmatter(&p.preTier2, p.fileBytes)
 		if wErr != nil {
+			fmt.Fprintf(out, "  Warning: could not render Tier 1 frontmatter for %s: %v\n",
+				p.job.RelPath, wErr)
 			return
 		}
-		_ = markdown.WriteFrontmatterFile(p.job.Path, content)
+		if wErr := markdown.WriteFrontmatterFile(p.job.Path, content); wErr != nil {
+			fmt.Fprintf(out, "  Warning: could not persist Tier 1 frontmatter for %s: %v\n",
+				p.job.RelPath, wErr)
+		}
 	}
 	if len(fallbackQueue) > 0 && !enrichDryRun {
 		// Resolve fallback config: explicit Enrich.Fallback fields fall back to
@@ -580,12 +616,21 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 		}
 	} else if len(fallbackQueue) > 0 && enrichDryRun {
 		// Dry-run: don't make LLM calls. Just report what would happen.
+		//
+		// These rows must be APPENDED, not assigned at p.resultIdx. In dry
+		// run the main loop `continue`s at the dry-run branch before any row
+		// is appended, so a queued file never got a row and its resultIdx
+		// points one past the end — or, once later files have appended rows
+		// of their own, at a row belonging to a DIFFERENT file. Indexing
+		// here therefore panicked with "index out of range" when the queued
+		// file was last, and silently overwrote another file's report
+		// otherwise. Reproduced on both the pre- and post-repair binaries.
 		fmt.Fprintf(out, "Dry-run: %d files would be queued for LLM fallback.\n", len(fallbackQueue))
 		for _, p := range fallbackQueue {
-			results[p.resultIdx] = enrichResult{
+			results = append(results, enrichResult{
 				Path:   p.job.Path,
 				Status: "fallback-pending-dry-run",
-			}
+			})
 		}
 	}
 
