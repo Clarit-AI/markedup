@@ -20,18 +20,18 @@ import (
 )
 
 var (
-	enrichDryRun             bool
-	enrichForce              bool
-	enrichSkipExist          bool
-	enrichModel              string
-	enrichEndpoint           string
-	enrichAPIKey             string
-	enrichEntityTypes        string
-	enrichPredicates         string
-	enrichTimeout            time.Duration
-	enrichFormat             string
-	enrichNuExtractMode      string
-	enrichNuExtractTransport string
+	enrichDryRun              bool
+	enrichForce               bool
+	enrichSkipExist           bool
+	enrichModel               string
+	enrichEndpoint            string
+	enrichAPIKey              string
+	enrichEntityTypes         string
+	enrichPredicates          string
+	enrichTimeout             time.Duration
+	enrichFormat              string
+	enrichNuExtractMode       string
+	enrichNuExtractTransport  string
 	enrichFallbackParallel    bool
 	enrichFallbackParallelSet bool
 	enrichApplyFallback       string
@@ -477,11 +477,15 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 				addHandoffJob(p, nil)
 			}
 		default:
+			// Resolve json_schema support without a network call. The starting
+			// assumption is the historical heuristic; if the endpoint actually
+			// rejects the parameter, the extractor degrades and caches the real
+			// answer for subsequent calls in this process (#144).
 			extractor := enrich.NewLLMFallbackExtractor(enrich.LLMFallbackConfig{
 				Endpoint:   fbEndpoint,
 				Model:      fbModel,
 				APIKey:     fbAPIKey,
-				SchemaMode: !isLocal, // local runtimes (llama.cpp/Ollama) often lack json_schema; cloud has it.
+				SchemaMode: enrich.ResolveSchemaMode(fbEndpoint, isLocal),
 			})
 			jobs := make([]enrich.FallbackJob, len(fallbackQueue))
 			for i, p := range fallbackQueue {
