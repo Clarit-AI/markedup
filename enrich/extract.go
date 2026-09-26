@@ -103,7 +103,9 @@ func extractHashtags(body string) []string {
 
 // extractWikilinks detects [[target]] links and returns relationships.
 func extractWikilinks(body string) []schema.Relationship {
-	matches := wikilinkRe.FindAllStringSubmatch(body, -1)
+	// Skip code fences and inline code.
+	cleanBody := stripCode(body)
+	matches := wikilinkRe.FindAllStringSubmatch(cleanBody, -1)
 	if matches == nil {
 		return nil
 	}
@@ -177,6 +179,25 @@ func stripCodeFences(body string) string {
 			result.WriteString(line)
 			result.WriteByte('\n')
 		}
+	}
+	return result.String()
+}
+
+// stripCode removes content inside fenced code blocks (``` ... ```) and inline code spans (`...`).
+func stripCode(body string) string {
+	// First, remove fenced code blocks.
+	noFences := stripCodeFences(body)
+	// Then, remove inline code spans by splitting on backticks and keeping even parts.
+	parts := strings.Split(noFences, "`")
+	if len(parts) <= 1 {
+		return noFences
+	}
+	var result strings.Builder
+	for i, part := range parts {
+		if i%2 == 0 {
+			result.WriteString(part)
+		}
+		// odd parts are the code content, we skip them.
 	}
 	return result.String()
 }

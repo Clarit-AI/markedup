@@ -145,6 +145,26 @@ func TestExtractWikilinks(t *testing.T) {
 			body:    "No wikilinks here.",
 			targets: nil,
 		},
+		{
+			name:    "wikilink in fenced code block skipped",
+			body:    "```\nSee [[Skip Me]]\n```\n[[Keep Me]]",
+			targets: []string{"keep-me"},
+		},
+		{
+			name:    "wikilink in inline code span skipped",
+			body:    "See `[[Skip Me]]` here, but [[Keep Me]] also.",
+			targets: []string{"keep-me"},
+		},
+		{
+			name:    "genuine prose wikilink kept",
+			body:    "This is a real [[WikiLink]] in text.",
+			targets: []string{"wikilink"},
+		},
+		{
+			name:    "mixed document: fenced, inline, and prose",
+			body:    "Before fence.\n```\n[[Skip in fence]]\n```\nAfter fence.\nSee `[[Skip in inline]]` and [[Keep Me]].",
+			targets: []string{"keep-me"},
+		},
 	}
 
 	for _, tt := range tests {
