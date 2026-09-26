@@ -542,6 +542,13 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 				content, wErr := markdown.ReplaceFrontmatter(&merged, p.fileBytes)
 				if wErr != nil {
 					failedFallback++
+					// The recovered merge could not be rendered, but the
+					// post-Tier-1 merge can: it is the same content this file
+					// would have received before the write was deferred, and
+					// before this deferral the main loop had already written
+					// it. Falling back to it keeps the file no worse than it
+					// was rather than leaving it un-enriched.
+					persistTier1(p)
 					results[p.resultIdx] = enrichResult{
 						Path: p.job.Path, Status: "failed",
 						Reason: fmt.Sprintf("recovered but failed to render frontmatter: %v", wErr),
