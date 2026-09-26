@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"encoding/json"
+	"flag"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,14 @@ import (
 
 	"github.com/Clarit-AI/markedup/schema"
 )
+
+// refreshBaseline makes the Phase-0 tests rewrite their committed artifact
+// instead of leaving it alone. Without it, `go test ./...` would dirty the
+// working tree on every run.
+//
+//	go test -run TestPhase0Baseline -refresh ./enrich/
+var refreshBaseline = flag.Bool("refresh", false,
+	"rewrite the committed Phase-0 baseline artifact")
 
 // Phase-0 baseline capture. The two numbers this test records — re-run flip
 // rate (Go map tie-break) and merge-gate drop rate (off-whitelist entity
@@ -143,7 +152,14 @@ func TestPhase0Baseline(t *testing.T) {
 		MergeGateDroppedInputs: dropped,
 		B1BeforeState:          b1,
 	}
-	writeArtifact(t, artifactRelPath, artifact)
+	// Only rewrite the committed artifact when explicitly asked. Rewriting on
+	// every `go test ./...` would dirty the working tree and produce churn in
+	// diffs for a file whose structural metrics are stable anyway.
+	if *refreshBaseline {
+		writeArtifact(t, artifactRelPath, artifact)
+	} else {
+		t.Logf("artifact left untouched; re-run with -refresh to rewrite it")
+	}
 
 	// The test doubles as a Phase-2 regression guard: it fails LOUDLY if any
 	// later change accidentally re-introduces the flip or drops.
