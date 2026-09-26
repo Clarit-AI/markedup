@@ -20,6 +20,30 @@ type SummaryStats struct {
 	Relationships int      `json:"relationships"`
 	EntityTypes   []string `json:"entity_types"`
 	Tags          []string `json:"tags"`
+
+	// DanglingTargets counts edges in the filtered set whose target resolved to
+	// no page, and DanglingTargetNames lists them (sorted, deduplicated).
+	//
+	// This is the B1 exit signal. A graph with DanglingTargets > 0 has edges
+	// pointing at documents that do not exist; one with 0 has every edge
+	// landing on a real page. Reporting it here — rather than only as a load
+	// warning — is what makes the condition countable by any consumer of the
+	// summary, including the MCP markedup_get_structure tool and export.
+	DanglingTargets     int      `json:"dangling_targets"`
+	DanglingTargetNames []string `json:"dangling_target_names,omitempty"`
+
+	// SemanticEdges counts edges sourced from Frontmatter.SemanticRelationships
+	// (Tier 2 NER) and SemanticEdgesResolved counts those that reconciled to a
+	// real page ID. Before reconciliation these edges were written to disk and
+	// never read, so SemanticEdges was structurally unreachable and
+	// SemanticEdgesResolved was always 0.
+	SemanticEdges         int `json:"semantic_edges"`
+	SemanticEdgesResolved int `json:"semantic_edges_resolved"`
+
+	// DerivedIDs counts pages whose MarkedUp ID was empty and was synthesized
+	// from the source path (B3). Before the fix these all collided on the ""
+	// key and all but one disappeared from the graph.
+	DerivedIDs int `json:"derived_ids"`
 }
 
 // SummaryNode is a compact representation of a single page in the graph.
@@ -138,9 +162,20 @@ func (idx *KnowledgeIndex) CompactGraphSummary(opts ...SummaryOption) *GraphSumm
 	}
 
 	// Build stats from filtered set.
+	//
+	// Relationships are counted from the index's reconciled adjacency rather
+	// than from Frontmatter.Relationships. The distinction is the whole point
+	// of B1: the frontmatter field holds only wikilink edges and silently omits
+	// every Tier 2 NER edge, so counting it here reported a graph that was
+	// smaller than the one traversal actually walks.
 	entityTypeSet := make(map[string]struct{})
 	tagSet := make(map[string]struct{})
 	totalRels := 0
+	semanticEdges := 0
+	semanticResolved := 0
+	derivedIDs := 0
+	danglingSet := make(map[string]struct{})
+
 	for _, p := range filtered {
 		if p.Frontmatter.EntityType != "" {
 			entityTypeSet[p.Frontmatter.EntityType] = struct{}{}
@@ -148,14 +183,45 @@ func (idx *KnowledgeIndex) CompactGraphSummary(opts ...SummaryOption) *GraphSumm
 		for _, t := range p.Frontmatter.Tags {
 			tagSet[t] = struct{}{}
 		}
-		totalRels += len(p.Frontmatter.Relationships)
+		if _, wasDerived := idx.derivedIDs[p.Frontmatter.ID]; wasDerived {
+			derivedIDs++
+		}
+		totalRels += len(idx.adjacency[p.Frontmatter.ID])
+		semanticEdges += len(p.Frontmatter.SemanticRelationships)
+	}
+
+	// Dangling targets are scoped to the filtered set so the numbers agree with
+	// the Relationships count above — mixing a filtered count with a global one
+	// would let the summary claim more edges than it lists.
+	danglingByFrom := make(map[string][]DanglingRef, len(idx.dangling))
+	for _, d := range idx.dangling {
+		danglingByFrom[d.From] = append(danglingByFrom[d.From], d)
+	}
+	for _, p := range filtered {
+		for _, d := range danglingByFrom[p.Frontmatter.ID] {
+			danglingSet[d.Target] = struct{}{}
+		}
+	}
+	// Count semantic edges that reconciled to a real page, for pages in the
+	// filtered set only.
+	for _, p := range filtered {
+		for _, rel := range p.Frontmatter.SemanticRelationships {
+			if _, ok := idx.resolver.resolve(rel.Target); ok {
+				semanticResolved++
+			}
+		}
 	}
 
 	stats := SummaryStats{
-		Pages:         len(filtered),
-		Relationships: totalRels,
-		EntityTypes:   sortedKeys(entityTypeSet),
-		Tags:          sortedKeys(tagSet),
+		Pages:                 len(filtered),
+		Relationships:         totalRels,
+		EntityTypes:           sortedKeys(entityTypeSet),
+		Tags:                  sortedKeys(tagSet),
+		DanglingTargets:       len(danglingSet),
+		DanglingTargetNames:   sortedKeys(danglingSet),
+		SemanticEdges:         semanticEdges,
+		SemanticEdgesResolved: semanticResolved,
+		DerivedIDs:            derivedIDs,
 	}
 
 	// Build compact nodes.
@@ -172,7 +238,7 @@ func (idx *KnowledgeIndex) CompactGraphSummary(opts ...SummaryOption) *GraphSumm
 		}
 
 		if cfg.includeRels {
-			for _, r := range fm.Relationships {
+			for _, r := range idx.adjacency[fm.ID] {
 				node.Relationships = append(node.Relationships, SummaryRelationship{
 					Target:   r.Target,
 					Type:     r.Type,

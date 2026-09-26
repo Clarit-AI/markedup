@@ -34,6 +34,32 @@ type KnowledgeIndex struct {
 	reverseAdj map[string][]string              // reverse: target ID → source IDs
 	allTags    []string                         // sorted, deduplicated
 	sortedIDs  []string                         // sorted page IDs for deterministic All()
+
+	// Reconciliation state, populated by buildIndex. See reconcile.go for the
+	// B1/B3 defects these address.
+
+	// dangling lists every edge whose target resolved to no page, across both
+	// the wikilink and NER relationship fields. Sorted by (target, from) so
+	// output is deterministic.
+	dangling []DanglingRef
+	// danglingTargets is the deduplicated, sorted set of unresolved target
+	// names — the count a caller most often wants.
+	danglingTargets []string
+	// derivedIDs holds pages whose MarkedUp ID was empty and was synthesized
+	// from the source path (B3).
+	derivedIDs map[string]struct{}
+	// semanticEdges counts edges sourced from SemanticRelationships.
+	semanticEdges int
+	// semanticResolved counts those that reconciled to a real page ID. Before
+	// this fix this number was structurally zero, because the field was never
+	// read at all.
+	semanticResolved int
+	// ambiguousAliases records normalized aliases claimed by more than one
+	// page. Surfaced so a surprising resolution can be explained.
+	ambiguousAliases map[string][]string
+	// resolver is retained so callers (notably the graph summary) can ask how
+	// a given target was resolved without rebuilding the alias table.
+	resolver *targetResolver
 }
 
 // Get returns the page with the given ID and true, or nil and false if the
@@ -125,15 +151,32 @@ func Import(data *IndexData) *KnowledgeIndex {
 
 // buildIndex constructs a KnowledgeIndex from a slice of parsed pages.
 // This is called single-threaded after all concurrent parsing is complete.
+//
+// buildIndex is the single funnel for both Load and Import, which is why the
+// B1/B3 fixes live here rather than in either caller: one place, no path that
+// can be forgotten.
 func buildIndex(pages []*schema.Page) *KnowledgeIndex {
 	idx := &KnowledgeIndex{
-		byID:       make(map[string]*schema.Page, len(pages)),
-		byTag:      make(map[string][]*schema.Page),
-		adjacency:  make(map[string][]schema.Relationship),
-		reverseAdj: make(map[string][]string),
+		byID:             make(map[string]*schema.Page, len(pages)),
+		byTag:            make(map[string][]*schema.Page),
+		adjacency:        make(map[string][]schema.Relationship),
+		reverseAdj:       make(map[string][]string),
+		derivedIDs:       make(map[string]struct{}),
+		ambiguousAliases: make(map[string][]string),
 	}
 
+	// B3: give every page an identity before anything is keyed on it. Without
+	// this, every page lacking a MarkedUp ID collides on "" and all but one
+	// silently vanish from the graph.
+	idx.derivedIDs = assignDerivedIDs(pages)
+
+	// The resolver needs the final ID set, so it runs after ID assignment.
+	resolver := newTargetResolver(pages)
+	idx.ambiguousAliases = resolver.ambiguous
+	idx.resolver = resolver
+
 	tagSet := make(map[string]struct{})
+	danglingSet := make(map[string]struct{})
 
 	for _, p := range pages {
 		id := p.Frontmatter.ID
@@ -145,14 +188,23 @@ func buildIndex(pages []*schema.Page) *KnowledgeIndex {
 			tagSet[tag] = struct{}{}
 		}
 
-		// Build forward adjacency.
-		if len(p.Frontmatter.Relationships) > 0 {
-			idx.adjacency[id] = p.Frontmatter.Relationships
-		}
+		// B1: fold BOTH relationship fields into one traversable edge list,
+		// resolving free-text NER targets to canonical document IDs. Before
+		// this, only Frontmatter.Relationships reached adjacency, so every
+		// Tier 2 edge was written to disk and then discarded by the reader.
+		edges := reconcileEdges(p, resolver)
+		idx.semanticEdges += edges.semanticTotal
+		idx.semanticResolved += edges.semanticResolved
 
-		// Build reverse adjacency.
-		for _, rel := range p.Frontmatter.Relationships {
+		if len(edges.edges) > 0 {
+			idx.adjacency[id] = edges.edges
+		}
+		for _, rel := range edges.edges {
 			idx.reverseAdj[rel.Target] = append(idx.reverseAdj[rel.Target], id)
+		}
+		for _, d := range edges.dangling {
+			idx.dangling = append(idx.dangling, d)
+			danglingSet[d.Target] = struct{}{}
 		}
 	}
 
@@ -170,5 +222,69 @@ func buildIndex(pages []*schema.Page) *KnowledgeIndex {
 	}
 	sort.Strings(idx.sortedIDs)
 
+	// B1b: make unresolvable targets countable rather than a warning that
+	// scrolls past. Sorted so repeated runs produce identical output.
+	idx.danglingTargets = make([]string, 0, len(danglingSet))
+	for t := range danglingSet {
+		idx.danglingTargets = append(idx.danglingTargets, t)
+	}
+	sort.Strings(idx.danglingTargets)
+	sort.Slice(idx.dangling, func(i, j int) bool {
+		if idx.dangling[i].Target != idx.dangling[j].Target {
+			return idx.dangling[i].Target < idx.dangling[j].Target
+		}
+		return idx.dangling[i].From < idx.dangling[j].From
+	})
+
 	return idx
+}
+
+// DanglingTargets returns the sorted, deduplicated set of relationship targets
+// that resolved to no page in the index. An empty result means every edge in
+// the graph lands on a real document.
+func (idx *KnowledgeIndex) DanglingTargets() []string {
+	out := make([]string, len(idx.danglingTargets))
+	copy(out, idx.danglingTargets)
+	return out
+}
+
+// DanglingRefs returns every unresolvable edge with the page that declared it
+// and whether it came from the NER field. Use this to tell a genuinely
+// missing document apart from a resolver miss.
+func (idx *KnowledgeIndex) DanglingRefs() []DanglingRef {
+	out := make([]DanglingRef, len(idx.dangling))
+	copy(out, idx.dangling)
+	return out
+}
+
+// DerivedIDs returns the sorted IDs of pages whose MarkedUp ID was empty and
+// was synthesized from the source path (B3). Non-empty means the corpus has
+// documents MarkedUp could not identify on its own.
+func (idx *KnowledgeIndex) DerivedIDs() []string {
+	out := make([]string, 0, len(idx.derivedIDs))
+	for id := range idx.derivedIDs {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// SemanticEdgeStats reports how many edges originated in
+// Frontmatter.SemanticRelationships (Tier 2 NER) and how many of those
+// reconciled to a real page ID. SemanticTotal > 0 with SemanticRead == 0 is
+// the exact shape of the B1 defect this package used to have.
+func (idx *KnowledgeIndex) SemanticEdgeStats() (total, resolved int) {
+	return idx.semanticEdges, idx.semanticResolved
+}
+
+// AmbiguousAliases returns aliases claimed by more than one page, mapped to
+// the pages that claim them. Sorted for determinism.
+func (idx *KnowledgeIndex) AmbiguousAliases() map[string][]string {
+	out := make(map[string][]string, len(idx.ambiguousAliases))
+	for k, v := range idx.ambiguousAliases {
+		owners := make([]string, len(v))
+		copy(owners, v)
+		out[k] = owners
+	}
+	return out
 }
