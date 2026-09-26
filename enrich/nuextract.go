@@ -13,6 +13,20 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// Priority order for breaking ties in entitiesFromRaw. Lower number wins.
+var typePriority = map[string]int{
+	"OTHER": 0,
+	"PERSON": 1,
+	"PROJECT": 2,
+	"CONCEPT": 3,
+	"ORGANIZATION": 4,
+	"DATE": 5,
+	"EVENT": 6,
+	"LOCATION": 7,
+	"TOOL": 8,
+	"TECHNOLOGY": 99,
+}
+
 // NuExtract-2.0 default predicate enum, used when config.NuExtract.Predicates
 // and the Extract predicates arg are both empty. Enums must be small and
 // stable because the model constrains outputs to them.
@@ -26,6 +40,7 @@ var defaultNuExtractPredicates = []string{
 var defaultNuExtractEntityTypes = []string{
 	"PERSON", "ORGANIZATION", "LOCATION", "CONCEPT",
 	"PROJECT", "TECHNOLOGY", "EVENT", "DATE", "OTHER",
+	"TOOL", "DOCUMENT",
 }
 
 // nuExtractStrength is the default relationship strength for NuExtract output.
@@ -803,7 +818,7 @@ func entitiesFromRaw(raw []nuextractEntity) ([]schema.Entity, string, error) {
 	bestType := ""
 	bestCount := 0
 	for t, c := range typeCounts {
-		if c > bestCount || (c == bestCount && bestType == "") {
+		if c > bestCount || (c == bestCount && (bestType == "" || typePriority[t] < typePriority[bestType])) {
 			bestType = t
 			bestCount = c
 		}

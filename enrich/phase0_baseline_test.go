@@ -83,12 +83,19 @@ func TestPhase0Baseline(t *testing.T) {
 		outcomes[et]++
 	}
 	flipMin, flipMax := minMax(outcomes)
+	if len(outcomes) != 1 {
+		t.Fatalf("expected flip rate to be zero (one outcome), got %d distinct outcomes", len(outcomes))
+	}
+	t.Logf("flip rate: %d distinct outcomes across %d runs (min=%d, max=%d) [expected 1]",
+		len(outcomes), n, flipMin, flipMax)
 
 	// --- 2. Merge-gate drop rate (B2). The five off-whitelist entity types   ---
 	// --- the nuextract vocabulary emits but the ValidEntityTypes gate rejects---
 	// --- (LOCATION/TECHNOLOGY/DATE/OTHER/PROJECT). MergeModelResult refuses   ---
 	// --- to apply them when existing.EntityType is empty or "document". With ---
 	// --- the whitelist enforced, count the inputs that did NOT take effect.  ---
+	// Reset residual count for this test
+	ResetResidualCount()
 	offWhitelistInputs := []string{"LOCATION", "TECHNOLOGY", "DATE", "OTHER", "PROJECT"}
 	mergeGateResult := make(map[string]string, len(offWhitelistInputs))
 	dropped := []string{}
@@ -98,9 +105,18 @@ func TestPhase0Baseline(t *testing.T) {
 		empty := schema.GraphFrontmatter{EntityType: ""}
 		got := MergeModelResult(empty, &ModelResult{EntityType: in}, MergeOptions{})
 		mergeGateResult[in] = got.EntityType
-		if got.EntityType == "" || got.EntityType == "document" {
-			dropped = append(dropped, in)
+		if in == "TECHNOLOGY" {
+			// TECHNOLOGY is residual, not a drop.
+			// We will check the residual count after the loop.
+		} else {
+			if got.EntityType == "" || got.EntityType == "document" {
+				dropped = append(dropped, in)
+			}
 		}
+	}
+	// Check that we got exactly one residual (for TECHNOLOGY)
+	if gotResidual := GetResidualCount(); gotResidual != 1 {
+		t.Fatalf("expected 1 residual (TECHNOLOGY), got %d", gotResidual)
 	}
 
 	// Also verify the explicit "document" frontmatter case. With existing =
@@ -164,10 +180,8 @@ func TestPhase0Baseline(t *testing.T) {
 	// The test doubles as a Phase-2 regression guard: it fails LOUDLY if any
 	// later change accidentally re-introduces the flip or drops.
 
-	t.Logf("flip rate: %d distinct outcomes across %d runs (min=%d, max=%d)",
-		len(outcomes), n, flipMin, flipMax)
-	t.Logf("merge-gate dropped: %d/%d off-whitelist inputs refused by MergeModelResult",
-		len(dropped), len(offWhitelistInputs))
+	t.Logf("merge-gate dropped: %d/%d off-whitelist inputs refused by MergeModelResult (excluding TECHNOLOGY residual)",
+		len(dropped), len(offWhitelistInputs)-1)
 }
 
 func writeArtifact(t *testing.T, relPath string, v any) {
