@@ -39,6 +39,12 @@ var (
 	// without reading stdin. Used by tests and `--no-handoff` style scripted
 	// runs where stdin is a TTY but the user wants the prompt suppressed.
 	enrichAssumeNo bool
+	// handoffLogDir overrides the directory handoff retry logs are written to.
+	// Empty means the user's real ~/.markedup/logs (production behavior). The cli
+	// test binary sets it in TestMain (setup_test.go) so tests exercising the
+	// handoff path never litter the developer's home — enrich.LogPathsIn exists
+	// for exactly this (#145 review finding).
+	handoffLogDir string
 )
 
 func newEnrichCmd() *cobra.Command {
@@ -697,13 +703,21 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// writeHandoffArtifacts writes the retry log to ~/.markedup/logs/ and
-// returns the paths plus the coding-agent name used in the suggested
-// command line. Wrapped here so the runEnrich body stays focused on
-// orchestration; testable indirectly via the handoff_test.go covering
-// WriteRetryLog directly.
+// writeHandoffArtifacts writes the retry log to ~/.markedup/logs/ — or to
+// handoffLogDir when set — and returns the paths plus the coding-agent name
+// used in the suggested command line. Wrapped here so the runEnrich body
+// stays focused on orchestration; testable indirectly via the handoff_test.go
+// covering WriteRetryLog directly.
 func writeHandoffArtifacts(jobs []enrich.HandoffJob) (enrich.HandoffPaths, string, error) {
-	paths, err := enrich.LogPathsNow()
+	var (
+		paths enrich.HandoffPaths
+		err   error
+	)
+	if handoffLogDir != "" {
+		paths, err = enrich.LogPathsIn(handoffLogDir)
+	} else {
+		paths, err = enrich.LogPathsNow()
+	}
 	if err != nil {
 		return enrich.HandoffPaths{}, "", err
 	}

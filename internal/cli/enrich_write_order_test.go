@@ -107,11 +107,15 @@ func TestRunEnrich_FailedTier2StillPersistsTier1(t *testing.T) {
 	require.NoError(t, err)
 	content := string(data)
 
-	// Tier 1 frontmatter must be present and correct.
+	// Tier 1 frontmatter must be present and correct. The relationship
+	// assertion targets the frontmatter field specifically: the body always
+	// contains the literal "wikilink" (bodies are preserved verbatim), so
+	// asserting on the bare word would pass even with no frontmatter at all.
 	assert.Contains(t, content, "id: crash-safety", "Tier 1 frontmatter must be persisted even when Tier 2 fails")
 	assert.Contains(t, content, "title: Crash Safety Doc")
 	assert.Contains(t, content, "entity-type: document")
-	assert.Contains(t, content, "wikilink")
+	assert.Contains(t, content, "target: wikilink",
+		"the [[wikilink]] relationship must be in the frontmatter, not just the preserved body")
 }
 
 // A queued file must be written with Tier-1 content and an EMPTY summary.
