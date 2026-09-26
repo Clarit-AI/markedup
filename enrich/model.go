@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/Clarit-AI/markedup/llm"
 	"github.com/Clarit-AI/markedup/schema"
@@ -32,30 +33,38 @@ var DefaultPredicates = []string{
 
 // Mapping from nuextract entity types (uppercase) to canonical ValidEntityTypes (lowercase).
 var entityTypeMap = map[string]string{
-	"PERSON":   "person",
+	"PERSON":       "person",
 	"ORGANIZATION": "organization",
-	"CONCEPT":  "concept",
-	"PROJECT":  "project",
-	"EVENT":    "event",
-	"LOCATION": "place",
-	"OTHER":    "document",
-	"DATE":     "event",
+	"CONCEPT":      "concept",
+	"PROJECT":      "project",
+	"EVENT":        "event",
+	"LOCATION":     "place",
+	"OTHER":        "document",
+	"DATE":         "event",
 }
 
-// residualCount is the number of times an entity type was residual since last reset.
-var residualCount int
+// residualCount is the number of entity types that could not be mapped to a
+// canonical label since the last reset.
+//
+// It is process-global rather than per-call because the merge functions return
+// a bare GraphFrontmatter and threading a side-channel return through every
+// caller would be a much larger change than the defect is worth. The cost is
+// that it is a process-wide running total, not a per-document count — read it
+// as "how many residuals has this run produced", never as a per-page property.
+//
+// It is atomic because the enrich CLI and RunFallbackBatch both process files
+// concurrently; a plain int here is a data race, not a slow counter.
+var residualCount atomic.Int64
 
 // ResetResidualCount resets the residual count to zero, mainly for testing.
 // Returns the previous value.
 func ResetResidualCount() int {
-	v := residualCount
-	residualCount = 0
-	return v
+	return int(residualCount.Swap(0))
 }
 
 // GetResidualCount returns the current residual count.
 func GetResidualCount() int {
-	return residualCount
+	return int(residualCount.Load())
 }
 
 // normalizeDocumentEntityType converts an extracted entity type to a canonical
@@ -402,7 +411,7 @@ func MergeModelResult(existing schema.GraphFrontmatter, model *ModelResult, opts
 		// promoted. See issue #128.
 		normalized, isResidual := normalizeDocumentEntityType(model.EntityType)
 		if isResidual {
-			residualCount++
+			residualCount.Add(1)
 		} else if normalized != "" {
 			if existing.EntityType == "" || strings.ToLower(existing.EntityType) == "document" {
 				result.EntityType = normalized
@@ -436,7 +445,7 @@ func MergeModelResult(existing schema.GraphFrontmatter, model *ModelResult, opts
 	// default (document)" — a real existing type is never overwritten.
 	normalized, isResidual := normalizeDocumentEntityType(model.EntityType)
 	if isResidual {
-		residualCount++
+		residualCount.Add(1)
 	} else if normalized != "" {
 		if result.EntityType == "" || strings.ToLower(result.EntityType) == "document" {
 			result.EntityType = normalized

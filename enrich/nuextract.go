@@ -15,17 +15,23 @@ import (
 
 // Priority order for breaking ties in entitiesFromRaw. Lower number wins.
 var typePriority = map[string]int{
-	"OTHER": 0,
-	"PERSON": 1,
-	"PROJECT": 2,
-	"CONCEPT": 3,
+	"OTHER":        0,
+	"PERSON":       1,
+	"PROJECT":      2,
+	"CONCEPT":      3,
 	"ORGANIZATION": 4,
-	"DATE": 5,
-	"EVENT": 6,
-	"LOCATION": 7,
-	"TOOL": 8,
-	"TECHNOLOGY": 99,
+	"DATE":         5,
+	"EVENT":        6,
+	"LOCATION":     7,
+	"TOOL":         8,
+	"TECHNOLOGY":   99,
 }
+
+// typePriorityUnknown ranks any type not in typePriority. It must be greater
+// than every explicit entry so a recognized role always wins a tie against an
+// unrecognized one; the lexicographic fallback in betterTieBreak then settles
+// ties among unknown types.
+const typePriorityUnknown = 1000
 
 // NuExtract-2.0 default predicate enum, used when config.NuExtract.Predicates
 // and the Extract predicates arg are both empty. Enums must be small and
@@ -815,15 +821,50 @@ func entitiesFromRaw(raw []nuextractEntity) ([]schema.Entity, string, error) {
 			typeCounts[role]++
 		}
 	}
+	// Pick the most frequent role, breaking ties on a fixed priority so re-runs
+	// are byte-identical.
+	//
+	// The tie-break must be a TOTAL order. typePriority only assigns an
+	// explicit value to the known enum, and Go returns 0 for a missing key, so
+	// an unrecognized role would tie with OTHER (priority 0) and the winner
+	// would depend on map iteration order again — the exact defect this
+	// replaces. The lexicographic fallback makes the order total over any
+	// input, including types nobody has seen yet.
 	bestType := ""
 	bestCount := 0
 	for t, c := range typeCounts {
-		if c > bestCount || (c == bestCount && (bestType == "" || typePriority[t] < typePriority[bestType])) {
+		if c > bestCount {
+			bestType, bestCount = t, c
+			continue
+		}
+		if c < bestCount {
+			continue
+		}
+		// Equal counts: break the tie deterministically.
+		if bestType == "" || betterTieBreak(t, bestType) {
 			bestType = t
-			bestCount = c
 		}
 	}
 	return entities, strings.ToLower(bestType), nil
+}
+
+// betterTieBreak reports whether candidate should win over incumbent when both
+// have the same frequency. Lower configured priority wins; an unknown type
+// sorts after every known one, and an exact priority tie falls back to
+// lexicographic order. Total and deterministic for any pair of strings.
+func betterTieBreak(candidate, incumbent string) bool {
+	cp, ok := typePriority[candidate]
+	if !ok {
+		cp = typePriorityUnknown
+	}
+	ip, ok := typePriority[incumbent]
+	if !ok {
+		ip = typePriorityUnknown
+	}
+	if cp != ip {
+		return cp < ip
+	}
+	return candidate < incumbent
 }
 
 func relationshipsFromRaw(raw []nuextractRelation) []schema.Relationship {
